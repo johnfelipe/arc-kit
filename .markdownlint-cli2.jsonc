@@ -64,6 +64,7 @@
     ".opencode/**",
     "arckit-opencode/**",
     "arckit-codex/commands/**",
+    "arckit-bedrock/prompts/**",
     "arckit-codex/prompts/**",
     "arckit-codex/skills/**",
     "arckit-gemini/skills/**",
