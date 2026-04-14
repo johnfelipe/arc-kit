@@ -199,19 +199,69 @@ AGENT_CONFIG = {
         "has_context_hook": False,
         "has_sync_guides_hook": False,
     },
+    "amazon_bedrock": {
+        "name": "Amazon Bedrock",
+        "output_dir": "arckit-bedrock/prompts",
+        "filename_pattern": "arckit-{name}.prompt.md",
+        "format": "bedrock",
+        "path_prefix": "",
+        "arg_placeholder": "{{input_architecture_docs}}",
+        "extension_dir": "arckit-bedrock",
+        "copy_commands_to_extension": False,
+        "copy_agents_to_extension": False,
+        "has_context_hook": False,
+        "has_sync_guides_hook": False,
+        "convert_paths_to_variables": True,
+    },
 }
+
+
+def _convert_paths_to_bedrock_vars(prompt):
+    """Convert file system paths to {{variable}} Bedrock template syntax.
+
+    In Amazon Bedrock Prompt Management there is no filesystem.
+    References to plugin files are replaced with {{variable}} placeholders.
+    """
+
+    def _path_to_var(path):
+        name = re.sub(r'\.[\w]+$', '', path)  # strip file extension
+        name = name.replace('/', '_').replace('-', '_').replace('.', '_')
+        name = re.sub(r'_+', '_', name).strip('_')
+        return '{{' + name + '}}'
+
+    result = prompt
+
+    # ${CLAUDE_PLUGIN_ROOT}/path/to/file.ext -> {{path_variable}}
+    result = re.sub(
+        r'\$\{CLAUDE_PLUGIN_ROOT\}/([^\s`\'"\)\]\n,]+)',
+        lambda m: _path_to_var(m.group(1)),
+        result,
+    )
+
+    # Also convert backtick-quoted .arckit/ paths -> {{variable}}
+    result = re.sub(
+        r'`\.arckit/([^`]+)`',
+        lambda m: '`' + _path_to_var(m.group(1)) + '`',
+        result,
+    )
+
+    return result
 
 
 def rewrite_paths(prompt, config):
     """Rewrite ${CLAUDE_PLUGIN_ROOT} paths using agent config."""
-    result = prompt.replace("${CLAUDE_PLUGIN_ROOT}", config["path_prefix"])
+    if config.get("convert_paths_to_variables"):
+        # Bedrock mode: convert file paths to {{variable}} syntax
+        result = _convert_paths_to_bedrock_vars(prompt)
+    else:
+        result = prompt.replace("${CLAUDE_PLUGIN_ROOT}", config["path_prefix"])
 
-    if config.get("rewrite_read_instructions"):
-        result = re.sub(
-            r"Read `(" + re.escape(config["path_prefix"]) + r"/[^`]+)`",
-            r"Run `cat \1` to read the file",
-            result,
-        )
+        if config.get("rewrite_read_instructions"):
+            result = re.sub(
+                r"Read `(" + re.escape(config["path_prefix"]) + r"/[^`]+)`",
+                r"Run `cat \1` to read the file",
+                result,
+            )
 
     if config.get("prepend_block"):
         result = config["prepend_block"] + result
@@ -391,14 +441,17 @@ def convert(commands_dir, agents_dir):
                 rewritten = rewrite_hook_dependencies(rewritten, config)
 
             # Determine handoff command format based on target
-            if config["format"] == "prompt":
-                cmd_fmt = "/arckit-{cmd}"
-            elif config["format"] == "skill":
-                cmd_fmt = "$arckit-{cmd}"
+            # Bedrock prompts are self-contained; skip handoffs
+            if config["format"] == "bedrock":
+                handoffs_section = ""
             else:
-                cmd_fmt = "/arckit:{cmd}"
-
-            handoffs_section = render_handoffs_section(handoffs, command_format=cmd_fmt)
+                if config["format"] == "prompt":
+                    cmd_fmt = "/arckit-{cmd}"
+                elif config["format"] == "skill":
+                    cmd_fmt = "$arckit-{cmd}"
+                else:
+                    cmd_fmt = "/arckit:{cmd}"
+                handoffs_section = render_handoffs_section(handoffs, command_format=cmd_fmt)
 
             if handoffs_section:
                 rewritten = rewritten.rstrip("\n") + "\n" + handoffs_section.rstrip("\n")
@@ -959,7 +1012,7 @@ if __name__ == "__main__":
     plugin_dir = "arckit-claude"
 
     print(
-        "Converting plugin commands to Codex, OpenCode, Gemini, and Copilot extension formats..."
+        "Converting plugin commands to Codex, OpenCode, Gemini, Copilot, and Bedrock extension formats..."
     )
     print()
     print(f"Source:       {commands_dir}")
