@@ -1153,6 +1153,414 @@ def generate_bedrock_dependencies(prompts_dir, output_path):
     print(f"  Generated: {output_path} ({total} commands)")
 
 
+def _cmd_to_state_name(cmd_name):
+    """Convert a command name like 'hld-review' to a CamelCase state name like 'HldReview'."""
+    return "".join(part.capitalize() for part in cmd_name.replace(".", "_").split("-"))
+
+
+def _cmd_to_result_key(cmd_name):
+    """Convert a command name like 'hld-review' to a snake_case key like 'hld_review'."""
+    return cmd_name.replace("-", "_").replace(".", "_")
+
+
+def _build_task_state(cmd_name, variables, result_path, is_end=False, next_state=None):
+    """Build an AWS Step Functions Task state for a single Bedrock command.
+
+    Mirrors the structure from the reference ar_principios.json:
+    - Lambda invoke with step_name, prompt_arn, variables
+    - ResultSelector for output/usage/latency
+    - Retry on TaskFailed
+    - TimeoutSeconds 900
+    """
+    state_name = _cmd_to_state_name(cmd_name)
+    result_key = _cmd_to_result_key(cmd_name)
+
+    # Build variable mappings using JSONPath references
+    var_mappings = {}
+    for var in variables:
+        # Strip {{ and }} to get the variable name
+        var_name = var.strip("{}")
+        # Determine the JSONPath source
+        if var_name.startswith("artifact_") or var_name.startswith("artifacts_"):
+            # Artifact from a previous governance step — reference the state output
+            source_key = var_name.replace("artifact_", "").replace("artifacts_", "")
+            var_mappings[var_name + ".$"] = "$." + source_key
+        else:
+            # Input or static variable — reference initial state input
+            var_mappings[var_name + ".$"] = "$." + var_name
+    state = {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::lambda:invoke",
+        "Parameters": {
+            "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+            "Payload": {
+                "step_name": cmd_name,
+                "prompt_arn": f"arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_{state_name.upper()}",
+                "variables": var_mappings,
+            },
+        },
+        "ResultSelector": {
+            "output.$": "$.Payload.output",
+            "usage.$": "$.Payload.usage",
+            "latency_seconds.$": "$.Payload.latency_seconds",
+        },
+        "ResultPath": "$." + result_path,
+        "TimeoutSeconds": 900,
+        "Retry": [
+            {
+                "ErrorEquals": ["States.TaskFailed"],
+                "IntervalSeconds": 30,
+                "MaxAttempts": 1,
+                "BackoffRate": 2,
+            }
+        ],
+    }
+    if is_end:
+        state["End"] = True
+    elif next_state:
+        state["Next"] = next_state
+    return state_name, state
+
+
+def generate_bedrock_step_functions_json(prompts_dir, output_path):
+    """Generate an AWS Step Functions state machine JSON for all 68 commands.
+
+    The JSON follows the same structure as the reference ar_principios.json:
+    - 14 governance commands run in phased dependency order (parallel where possible)
+    - 54 independent commands run in parallel batches alongside the governance flow
+    - Each command is a Lambda Task invoking Bedrock with prompt_arn and variables
+    """
+    # Collect variables per command from generated prompt files
+    command_vars = {}
+    if os.path.isdir(prompts_dir):
+        for filename in sorted(os.listdir(prompts_dir)):
+            if not filename.endswith(".prompt.md"):
+                continue
+            cmd_name = filename.replace("arckit-", "", 1).replace(".prompt.md", "")
+            filepath = os.path.join(prompts_dir, filename)
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            variables = sorted(set(re.findall(r'\{\{[^}]+\}\}', content)))
+            command_vars[cmd_name] = variables
+
+    governance_cmds = {cmd for cmd, _, _ in _BEDROCK_GOVERNANCE_FLOW}
+    independent_cmds = sorted(cmd for cmd in command_vars if cmd not in governance_cmds)
+
+    states = {}
+
+    # ── Build governance flow phases (same logic as reference JSON) ──
+
+    # Phase 1: Plan & Principles (parallel, no dependencies)
+    plan_name, plan_state = _build_task_state(
+        "plan", _BEDROCK_GOVERNANCE_FLOW[0][1], "plan", is_end=True
+    )
+    principles_name, principles_state = _build_task_state(
+        "principles", _BEDROCK_GOVERNANCE_FLOW[1][1], "principles", is_end=True
+    )
+    states["Phase1_PlanAndPrinciples"] = {
+        "Type": "Parallel",
+        "Comment": "Plan and Principles have no mutual dependency — run in parallel",
+        "Branches": [
+            {"StartAt": "Invoke" + plan_name, "States": {"Invoke" + plan_name: plan_state}},
+            {"StartAt": "Invoke" + principles_name, "States": {"Invoke" + principles_name: principles_state}},
+        ],
+        "ResultPath": "$.phase1",
+        "Next": "MergePhase1",
+    }
+    states["MergePhase1"] = {
+        "Type": "Pass",
+        "Comment": "Merge parallel outputs into a flat structure",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "input_principles.$": "$.input_principles",
+            "plan.$": "$.phase1[0].plan.output",
+            "principles.$": "$.phase1[1].principles.output",
+        },
+        "Next": "Phase2_Stakeholders",
+    }
+
+    # Phase 2: Stakeholders (depends on principles)
+    stakeholders_name, stakeholders_state = _build_task_state(
+        "stakeholders", _BEDROCK_GOVERNANCE_FLOW[2][1], "stakeholders_result",
+        next_state="AddStakeholders"
+    )
+    states["Phase2_Stakeholders"] = stakeholders_state
+    states["Phase2_Stakeholders"]["Next"] = "AddStakeholders"
+    states["AddStakeholders"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "input_principles.$": "$.input_principles",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders_result.output",
+        },
+        "Next": "Phase3_RiskSobcRequirements",
+    }
+
+    # Phase 3: Risk, SOBC, Requirements (parallel — all depend on stakeholders+principles)
+    risk_name, risk_state = _build_task_state(
+        "risk", _BEDROCK_GOVERNANCE_FLOW[3][1], "risk", is_end=True
+    )
+    sobc_name, sobc_state = _build_task_state(
+        "sobc", _BEDROCK_GOVERNANCE_FLOW[4][1], "sobc", is_end=True
+    )
+    req_name, req_state = _build_task_state(
+        "requirements", _BEDROCK_GOVERNANCE_FLOW[5][1], "requirements", is_end=True
+    )
+    states["Phase3_RiskSobcRequirements"] = {
+        "Type": "Parallel",
+        "Comment": "Risk, Sobc, Requirements can run in parallel (all depend on Stakeholders+Principles)",
+        "Branches": [
+            {"StartAt": "Invoke" + risk_name, "States": {"Invoke" + risk_name: risk_state}},
+            {"StartAt": "Invoke" + sobc_name, "States": {"Invoke" + sobc_name: sobc_state}},
+            {"StartAt": "Invoke" + req_name, "States": {"Invoke" + req_name: req_state}},
+        ],
+        "ResultPath": "$.phase3",
+        "Next": "MergePhase3",
+    }
+    states["MergePhase3"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "input_principles.$": "$.input_principles",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.phase3[0].risk.output",
+            "sobc.$": "$.phase3[1].sobc.output",
+            "requirements.$": "$.phase3[2].requirements.output",
+        },
+        "Next": "Phase4_DataModelWardleySow",
+    }
+
+    # Phase 4: DataModel, Wardley, Sow (parallel)
+    dm_name, dm_state = _build_task_state(
+        "data-model", _BEDROCK_GOVERNANCE_FLOW[6][1], "data_model", is_end=True
+    )
+    wardley_name, wardley_state = _build_task_state(
+        "wardley", _BEDROCK_GOVERNANCE_FLOW[7][1], "wardley", is_end=True
+    )
+    sow_name, sow_state = _build_task_state(
+        "sow", _BEDROCK_GOVERNANCE_FLOW[8][1], "sow", is_end=True
+    )
+    states["Phase4_DataModelWardleySow"] = {
+        "Type": "Parallel",
+        "Comment": "DataModel, Wardley, Sow can run in parallel",
+        "Branches": [
+            {"StartAt": "Invoke" + dm_name, "States": {"Invoke" + dm_name: dm_state}},
+            {"StartAt": "Invoke" + wardley_name, "States": {"Invoke" + wardley_name: wardley_state}},
+            {"StartAt": "Invoke" + sow_name, "States": {"Invoke" + sow_name: sow_state}},
+        ],
+        "ResultPath": "$.phase4",
+        "Next": "MergePhase4",
+    }
+    states["MergePhase4"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "input_principles.$": "$.input_principles",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.risk",
+            "sobc.$": "$.sobc",
+            "requirements.$": "$.requirements",
+            "data_model.$": "$.phase4[0].data_model.output",
+            "wardley.$": "$.phase4[1].wardley.output",
+            "sow.$": "$.phase4[2].sow.output",
+        },
+        "Next": "Phase5_EvaluateAndHldReview",
+    }
+
+    # Phase 5: Evaluate & HLD Review (parallel — both depend on sow)
+    eval_name, eval_state = _build_task_state(
+        "evaluate", _BEDROCK_GOVERNANCE_FLOW[9][1], "evaluate", is_end=True
+    )
+    hld_name, hld_state = _build_task_state(
+        "hld-review", _BEDROCK_GOVERNANCE_FLOW[10][1], "hld_review", is_end=True
+    )
+    states["Phase5_EvaluateAndHldReview"] = {
+        "Type": "Parallel",
+        "Comment": "Evaluate and HldReview both depend on Sow — run in parallel",
+        "Branches": [
+            {"StartAt": "Invoke" + eval_name, "States": {"Invoke" + eval_name: eval_state}},
+            {"StartAt": "Invoke" + hld_name, "States": {"Invoke" + hld_name: hld_state}},
+        ],
+        "ResultPath": "$.phase5",
+        "Next": "MergePhase5",
+    }
+    states["MergePhase5"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.risk",
+            "sobc.$": "$.sobc",
+            "requirements.$": "$.requirements",
+            "data_model.$": "$.data_model",
+            "wardley.$": "$.wardley",
+            "sow.$": "$.sow",
+            "evaluate.$": "$.phase5[0].evaluate.output",
+            "hld_review.$": "$.phase5[1].hld_review.output",
+        },
+        "Next": "Phase6_DldReview",
+    }
+
+    # Phase 6: DLD Review (depends on HLD Review)
+    dld_name, dld_state = _build_task_state(
+        "dld-review", _BEDROCK_GOVERNANCE_FLOW[11][1], "dld_review_result",
+        next_state="AddDldReview"
+    )
+    states["Phase6_DldReview"] = dld_state
+    states["Phase6_DldReview"]["Next"] = "AddDldReview"
+    states["AddDldReview"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.risk",
+            "sobc.$": "$.sobc",
+            "requirements.$": "$.requirements",
+            "data_model.$": "$.data_model",
+            "wardley.$": "$.wardley",
+            "sow.$": "$.sow",
+            "evaluate.$": "$.evaluate",
+            "hld_review.$": "$.hld_review",
+            "dld_review.$": "$.dld_review_result.output",
+        },
+        "Next": "Phase7_Traceability",
+    }
+
+    # Phase 7: Traceability (depends on DLD Review)
+    trace_name, trace_state = _build_task_state(
+        "traceability", _BEDROCK_GOVERNANCE_FLOW[12][1], "traceability_result",
+        next_state="AddTraceability"
+    )
+    states["Phase7_Traceability"] = trace_state
+    states["Phase7_Traceability"]["Next"] = "AddTraceability"
+    states["AddTraceability"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.risk",
+            "sobc.$": "$.sobc",
+            "requirements.$": "$.requirements",
+            "data_model.$": "$.data_model",
+            "wardley.$": "$.wardley",
+            "sow.$": "$.sow",
+            "evaluate.$": "$.evaluate",
+            "hld_review.$": "$.hld_review",
+            "dld_review.$": "$.dld_review",
+            "traceability.$": "$.traceability_result.output",
+        },
+        "Next": "Phase8_Analyze",
+    }
+
+    # Phase 8: Analyze (final aggregator — receives 9 upstream artifacts)
+    analyze_name, analyze_state = _build_task_state(
+        "analyze", _BEDROCK_GOVERNANCE_FLOW[13][1], "analyze_result",
+        next_state="BuildGovernanceOutput"
+    )
+    states["Phase8_Analyze"] = analyze_state
+    states["Phase8_Analyze"]["Comment"] = "Final aggregator — receives 9 upstream artifacts"
+    states["Phase8_Analyze"]["Next"] = "BuildGovernanceOutput"
+
+    states["BuildGovernanceOutput"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.risk",
+            "sobc.$": "$.sobc",
+            "requirements.$": "$.requirements",
+            "data_model.$": "$.data_model",
+            "wardley.$": "$.wardley",
+            "sow.$": "$.sow",
+            "evaluate.$": "$.evaluate",
+            "hld_review.$": "$.hld_review",
+            "dld_review.$": "$.dld_review",
+            "traceability.$": "$.traceability",
+            "analyze.$": "$.analyze_result.output",
+        },
+        "End": True,
+    }
+
+    # ── Build independent commands (non-governance) ──
+    # These commands have no inter-command dependencies and can all run in
+    # parallel. We batch them into groups of 10 to stay within Step Functions
+    # Parallel branch limits.
+
+    BATCH_SIZE = 10
+    independent_batches = []
+    for i in range(0, len(independent_cmds), BATCH_SIZE):
+        independent_batches.append(independent_cmds[i:i + BATCH_SIZE])
+
+    for batch_idx, batch in enumerate(independent_batches):
+        batch_branches = []
+        for cmd in batch:
+            variables = command_vars.get(cmd, [])
+            cmd_state_name, cmd_state = _build_task_state(
+                cmd, variables, _cmd_to_result_key(cmd), is_end=True
+            )
+            batch_branches.append({
+                "StartAt": "Invoke" + cmd_state_name,
+                "States": {"Invoke" + cmd_state_name: cmd_state},
+            })
+
+        batch_state_name = f"IndependentBatch{batch_idx + 1}"
+        next_batch = f"IndependentBatch{batch_idx + 2}" if batch_idx < len(independent_batches) - 1 else "BuildFinalOutput"
+
+        states[batch_state_name] = {
+            "Type": "Parallel",
+            "Comment": f"Independent commands batch {batch_idx + 1} ({len(batch)} commands)",
+            "Branches": batch_branches,
+            "ResultPath": f"$.batch{batch_idx + 1}",
+            "Next": next_batch,
+        }
+
+    # ── Top-level structure ──
+    # The governance flow and independent commands run sequentially:
+    # governance pipeline first, then independent batches.
+    # This keeps the JSON clean and avoids nested Parallel-of-Parallel limits.
+
+    # Rewire: governance output leads to first independent batch
+    if independent_batches:
+        states["BuildGovernanceOutput"]["End"] = False
+        states["BuildGovernanceOutput"]["Next"] = "IndependentBatch1"
+        del states["BuildGovernanceOutput"]["End"]
+
+    # Final output collects everything
+    final_params = {
+        "governance_flow.$": "$",
+    }
+    states["BuildFinalOutput"] = {
+        "Type": "Pass",
+        "Comment": f"All {len(command_vars)} commands completed",
+        "End": True,
+    }
+
+    state_machine = {
+        "Comment": f"ArcKit Architecture Pipeline — {len(command_vars)} prompts orchestrated via Step Functions + Bedrock Converse",
+        "StartAt": "Phase1_PlanAndPrinciples",
+        "States": states,
+    }
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(state_machine, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    print(f"  Generated: {output_path} ({len(command_vars)} commands, {len(states)} states)")
+
+
 if __name__ == "__main__":
     commands_dir = "arckit-claude/commands/"
     agents_dir = "arckit-claude/agents/"
@@ -1269,6 +1677,13 @@ if __name__ == "__main__":
     generate_bedrock_dependencies(
         "arckit-bedrock/prompts",
         "arckit-bedrock/bedrock-dependencies.md",
+    )
+
+    print()
+    print("Generating Bedrock Step Functions JSON...")
+    generate_bedrock_step_functions_json(
+        "arckit-bedrock/prompts",
+        "arckit-bedrock/bedrock-step-functions.json",
     )
 
     print()
