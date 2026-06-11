@@ -32,6 +32,7 @@ AUTHORIZED_USERS = {
     "Maria-Andreina.Hidalgo@gft.com": {"name": "María Andreína Hidalgo", "role": "Arquitecta"},
     "Peter-Wilhelm@gft.com": {"name": "Peter Wilhelm", "role": "Arquitecto"},
     "Eduardo.Rojas@gft.com": {"name": "Eduardo Rojas", "role": "Arquitecto"},
+    "Jhon.Urrego@gft.com": {"name": "Jhon Urrego", "role": "Arquitecto"},
 }
 
 
