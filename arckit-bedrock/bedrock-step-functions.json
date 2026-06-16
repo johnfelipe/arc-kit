@@ -1,0 +1,2932 @@
+{
+  "Comment": "ArcKit Architecture Pipeline — 68 prompts orchestrated via Step Functions + Bedrock Converse",
+  "StartAt": "Phase1_PlanAndPrinciples",
+  "States": {
+    "Phase1_PlanAndPrinciples": {
+      "Type": "Parallel",
+      "Comment": "Plan and Principles have no mutual dependency — run in parallel",
+      "Branches": [
+        {
+          "StartAt": "InvokePlan",
+          "States": {
+            "InvokePlan": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "plan",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_PLAN",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.plan",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokePrinciples",
+          "States": {
+            "InvokePrinciples": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "principles",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_PRINCIPLES",
+                  "variables": {
+                    "input_principles.$": "$.input_principles"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.principles",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.phase1",
+      "Next": "MergePhase1"
+    },
+    "MergePhase1": {
+      "Type": "Pass",
+      "Comment": "Merge parallel outputs into a flat structure",
+      "Parameters": {
+        "input_architecture_docs.$": "$.input_architecture_docs",
+        "input_principles.$": "$.input_principles",
+        "plan.$": "$.phase1[0].plan.output",
+        "principles.$": "$.phase1[1].principles.output"
+      },
+      "Next": "Phase2_Stakeholders"
+    },
+    "Phase2_Stakeholders": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+        "Payload": {
+          "step_name": "stakeholders",
+          "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_STAKEHOLDERS",
+          "variables": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "artifact_principles.$": "$.principles"
+          }
+        }
+      },
+      "ResultSelector": {
+        "output.$": "$.Payload.output",
+        "usage.$": "$.Payload.usage",
+        "latency_seconds.$": "$.Payload.latency_seconds"
+      },
+      "ResultPath": "$.stakeholders_result",
+      "TimeoutSeconds": 900,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "AddStakeholders"
+    },
+    "AddStakeholders": {
+      "Type": "Pass",
+      "Parameters": {
+        "input_architecture_docs.$": "$.input_architecture_docs",
+        "input_principles.$": "$.input_principles",
+        "plan.$": "$.plan",
+        "principles.$": "$.principles",
+        "stakeholders.$": "$.stakeholders_result.output"
+      },
+      "Next": "Phase3_RiskSobcRequirements"
+    },
+    "Phase3_RiskSobcRequirements": {
+      "Type": "Parallel",
+      "Comment": "Risk, Sobc, Requirements can run in parallel (all depend on Stakeholders+Principles)",
+      "Branches": [
+        {
+          "StartAt": "InvokeRisk",
+          "States": {
+            "InvokeRisk": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "risk",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_RISK",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "artifact_stakeholders.$": "$.stakeholders",
+                    "artifact_principles.$": "$.principles"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.risk",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeSobc",
+          "States": {
+            "InvokeSobc": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "sobc",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_SOBC",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "artifact_stakeholders.$": "$.stakeholders",
+                    "artifact_principles.$": "$.principles"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.sobc",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeRequirements",
+          "States": {
+            "InvokeRequirements": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "requirements",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_REQUIREMENTS",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "artifact_stakeholders.$": "$.stakeholders",
+                    "artifact_principles.$": "$.principles"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.requirements",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.phase3",
+      "Next": "MergePhase3"
+    },
+    "MergePhase3": {
+      "Type": "Pass",
+      "Parameters": {
+        "input_architecture_docs.$": "$.input_architecture_docs",
+        "input_principles.$": "$.input_principles",
+        "plan.$": "$.plan",
+        "principles.$": "$.principles",
+        "stakeholders.$": "$.stakeholders",
+        "risk.$": "$.phase3[0].risk.output",
+        "sobc.$": "$.phase3[1].sobc.output",
+        "requirements.$": "$.phase3[2].requirements.output"
+      },
+      "Next": "Phase4_DataModelWardleySow"
+    },
+    "Phase4_DataModelWardleySow": {
+      "Type": "Parallel",
+      "Comment": "DataModel, Wardley, Sow can run in parallel",
+      "Branches": [
+        {
+          "StartAt": "InvokeDataModel",
+          "States": {
+            "InvokeDataModel": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "data-model",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_DATAMODEL",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "artifact_stakeholders.$": "$.stakeholders",
+                    "artifact_requirements.$": "$.requirements",
+                    "artifact_sobc.$": "$.sobc"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.data_model",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeWardley",
+          "States": {
+            "InvokeWardley": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "wardley",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_WARDLEY",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "artifact_principles.$": "$.principles",
+                    "artifact_requirements.$": "$.requirements"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.wardley",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeSow",
+          "States": {
+            "InvokeSow": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "sow",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_SOW",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "artifact_requirements.$": "$.requirements",
+                    "artifact_principles.$": "$.principles"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.sow",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.phase4",
+      "Next": "MergePhase4"
+    },
+    "MergePhase4": {
+      "Type": "Pass",
+      "Parameters": {
+        "input_architecture_docs.$": "$.input_architecture_docs",
+        "input_principles.$": "$.input_principles",
+        "plan.$": "$.plan",
+        "principles.$": "$.principles",
+        "stakeholders.$": "$.stakeholders",
+        "risk.$": "$.risk",
+        "sobc.$": "$.sobc",
+        "requirements.$": "$.requirements",
+        "data_model.$": "$.phase4[0].data_model.output",
+        "wardley.$": "$.phase4[1].wardley.output",
+        "sow.$": "$.phase4[2].sow.output"
+      },
+      "Next": "Phase5_EvaluateAndHldReview"
+    },
+    "Phase5_EvaluateAndHldReview": {
+      "Type": "Parallel",
+      "Comment": "Evaluate and HldReview both depend on Sow — run in parallel",
+      "Branches": [
+        {
+          "StartAt": "InvokeEvaluate",
+          "States": {
+            "InvokeEvaluate": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "evaluate",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_EVALUATE",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "artifact_principles.$": "$.principles",
+                    "artifact_requirements.$": "$.requirements",
+                    "artifact_sow.$": "$.sow"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.evaluate",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeHldReview",
+          "States": {
+            "InvokeHldReview": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "hld-review",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_HLDREVIEW",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "artifact_principles.$": "$.principles",
+                    "artifact_requirements.$": "$.requirements",
+                    "artifact_sow.$": "$.sow"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.hld_review",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.phase5",
+      "Next": "MergePhase5"
+    },
+    "MergePhase5": {
+      "Type": "Pass",
+      "Parameters": {
+        "input_architecture_docs.$": "$.input_architecture_docs",
+        "plan.$": "$.plan",
+        "principles.$": "$.principles",
+        "stakeholders.$": "$.stakeholders",
+        "risk.$": "$.risk",
+        "sobc.$": "$.sobc",
+        "requirements.$": "$.requirements",
+        "data_model.$": "$.data_model",
+        "wardley.$": "$.wardley",
+        "sow.$": "$.sow",
+        "evaluate.$": "$.phase5[0].evaluate.output",
+        "hld_review.$": "$.phase5[1].hld_review.output"
+      },
+      "Next": "Phase6_DldReview"
+    },
+    "Phase6_DldReview": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+        "Payload": {
+          "step_name": "dld-review",
+          "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_DLDREVIEW",
+          "variables": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "artifact_hld_review.$": "$.hld_review",
+            "artifact_principles.$": "$.principles",
+            "artifact_requirements.$": "$.requirements"
+          }
+        }
+      },
+      "ResultSelector": {
+        "output.$": "$.Payload.output",
+        "usage.$": "$.Payload.usage",
+        "latency_seconds.$": "$.Payload.latency_seconds"
+      },
+      "ResultPath": "$.dld_review_result",
+      "TimeoutSeconds": 900,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "AddDldReview"
+    },
+    "AddDldReview": {
+      "Type": "Pass",
+      "Parameters": {
+        "input_architecture_docs.$": "$.input_architecture_docs",
+        "plan.$": "$.plan",
+        "principles.$": "$.principles",
+        "stakeholders.$": "$.stakeholders",
+        "risk.$": "$.risk",
+        "sobc.$": "$.sobc",
+        "requirements.$": "$.requirements",
+        "data_model.$": "$.data_model",
+        "wardley.$": "$.wardley",
+        "sow.$": "$.sow",
+        "evaluate.$": "$.evaluate",
+        "hld_review.$": "$.hld_review",
+        "dld_review.$": "$.dld_review_result.output"
+      },
+      "Next": "Phase7_Traceability"
+    },
+    "Phase7_Traceability": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+        "Payload": {
+          "step_name": "traceability",
+          "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_TRACEABILITY",
+          "variables": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "artifact_requirements.$": "$.requirements",
+            "artifact_hld_review.$": "$.hld_review",
+            "artifact_dld_review.$": "$.dld_review"
+          }
+        }
+      },
+      "ResultSelector": {
+        "output.$": "$.Payload.output",
+        "usage.$": "$.Payload.usage",
+        "latency_seconds.$": "$.Payload.latency_seconds"
+      },
+      "ResultPath": "$.traceability_result",
+      "TimeoutSeconds": 900,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "AddTraceability"
+    },
+    "AddTraceability": {
+      "Type": "Pass",
+      "Parameters": {
+        "input_architecture_docs.$": "$.input_architecture_docs",
+        "plan.$": "$.plan",
+        "principles.$": "$.principles",
+        "stakeholders.$": "$.stakeholders",
+        "risk.$": "$.risk",
+        "sobc.$": "$.sobc",
+        "requirements.$": "$.requirements",
+        "data_model.$": "$.data_model",
+        "wardley.$": "$.wardley",
+        "sow.$": "$.sow",
+        "evaluate.$": "$.evaluate",
+        "hld_review.$": "$.hld_review",
+        "dld_review.$": "$.dld_review",
+        "traceability.$": "$.traceability_result.output"
+      },
+      "Next": "Phase8_Analyze"
+    },
+    "Phase8_Analyze": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+        "Payload": {
+          "step_name": "analyze",
+          "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_ANALYZE",
+          "variables": {
+            "artifact_principles.$": "$.principles",
+            "artifact_stakeholders.$": "$.stakeholders",
+            "artifact_risk.$": "$.risk",
+            "artifact_sobc.$": "$.sobc",
+            "artifact_requirements.$": "$.requirements",
+            "artifact_data_model.$": "$.data_model",
+            "artifact_sow.$": "$.sow",
+            "artifact_hld.$": "$.hld",
+            "artifact_dld.$": "$.dld"
+          }
+        }
+      },
+      "ResultSelector": {
+        "output.$": "$.Payload.output",
+        "usage.$": "$.Payload.usage",
+        "latency_seconds.$": "$.Payload.latency_seconds"
+      },
+      "ResultPath": "$.analyze_result",
+      "TimeoutSeconds": 900,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "BuildGovernanceOutput",
+      "Comment": "Final aggregator — receives 9 upstream artifacts"
+    },
+    "BuildGovernanceOutput": {
+      "Type": "Pass",
+      "Parameters": {
+        "plan.$": "$.plan",
+        "principles.$": "$.principles",
+        "stakeholders.$": "$.stakeholders",
+        "risk.$": "$.risk",
+        "sobc.$": "$.sobc",
+        "requirements.$": "$.requirements",
+        "data_model.$": "$.data_model",
+        "wardley.$": "$.wardley",
+        "sow.$": "$.sow",
+        "evaluate.$": "$.evaluate",
+        "hld_review.$": "$.hld_review",
+        "dld_review.$": "$.dld_review",
+        "traceability.$": "$.traceability",
+        "analyze.$": "$.analyze_result.output"
+      },
+      "Next": "IndependentBatch1"
+    },
+    "IndependentBatch1": {
+      "Type": "Parallel",
+      "Comment": "Independent commands batch 1 (10 commands)",
+      "Branches": [
+        {
+          "StartAt": "InvokeAdr",
+          "States": {
+            "InvokeAdr": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "adr",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_ADR",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_adr_template.$": "$.templates_adr_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.adr",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeAiPlaybook",
+          "States": {
+            "InvokeAiPlaybook": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "ai-playbook",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_AIPLAYBOOK",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_uk_gov_ai_playbook_template.$": "$.templates_uk_gov_ai_playbook_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.ai_playbook",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeAtrs",
+          "States": {
+            "InvokeAtrs": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "atrs",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_ATRS",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_uk_gov_atrs_template.$": "$.templates_uk_gov_atrs_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.atrs",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeAwsResearch",
+          "States": {
+            "InvokeAwsResearch": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "aws-research",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_AWSRESEARCH",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_aws_research_template.$": "$.templates_aws_research_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.aws_research",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeAzureResearch",
+          "States": {
+            "InvokeAzureResearch": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "azure-research",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_AZURERESEARCH",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_azure_research_template.$": "$.templates_azure_research_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.azure_research",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeBacklog",
+          "States": {
+            "InvokeBacklog": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "backlog",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_BACKLOG",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "skills_mermaid_syntax_references_flowchart.$": "$.skills_mermaid_syntax_references_flowchart"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.backlog",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeConformance",
+          "States": {
+            "InvokeConformance": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "conformance",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_CONFORMANCE",
+                  "variables": {
+                    "conformance_rules.$": "$.conformance_rules",
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_conformance_assessment_template.$": "$.templates_conformance_assessment_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.conformance",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeCustomize",
+          "States": {
+            "InvokeCustomize": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "customize",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_CUSTOMIZE",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "templates_*_template.$": "$.templates_*_template",
+                    "templates_requirements_template.$": "$.templates_requirements_template",
+                    "templates.$": "$.templates"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.customize",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeDataMeshContract",
+          "States": {
+            "InvokeDataMeshContract": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "data-mesh-contract",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_DATAMESHCONTRACT",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_data_mesh_contract_template.$": "$.templates_data_mesh_contract_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.data_mesh_contract",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeDatascout",
+          "States": {
+            "InvokeDatascout": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "datascout",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_DATASCOUT",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_datascout_template.$": "$.templates_datascout_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.datascout",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.batch1",
+      "Next": "IndependentBatch2"
+    },
+    "IndependentBatch2": {
+      "Type": "Parallel",
+      "Comment": "Independent commands batch 2 (10 commands)",
+      "Branches": [
+        {
+          "StartAt": "InvokeDevops",
+          "States": {
+            "InvokeDevops": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "devops",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_DEVOPS",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_devops_template.$": "$.templates_devops_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.devops",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeDfd",
+          "States": {
+            "InvokeDfd": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "dfd",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_DFD",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "skills_mermaid_syntax_references_flowchart.$": "$.skills_mermaid_syntax_references_flowchart",
+                    "templates_dfd_template.$": "$.templates_dfd_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.dfd",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeDiagram",
+          "States": {
+            "InvokeDiagram": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "diagram",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_DIAGRAM",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "skills_mermaid_syntax_references_c4_layout_science.$": "$.skills_mermaid_syntax_references_c4_layout_science",
+                    "skills_mermaid_syntax_references_c4.$": "$.skills_mermaid_syntax_references_c4",
+                    "skills_mermaid_syntax_references_entityRelationshipDiagram.$": "$.skills_mermaid_syntax_references_entityRelationshipDiagram",
+                    "skills_mermaid_syntax_references_flowchart.$": "$.skills_mermaid_syntax_references_flowchart",
+                    "skills_mermaid_syntax_references_sequenceDiagram.$": "$.skills_mermaid_syntax_references_sequenceDiagram",
+                    "skills_plantuml_syntax_references_c4_plantuml.$": "$.skills_plantuml_syntax_references_c4_plantuml",
+                    "skills_plantuml_syntax_references_sequence_diagrams.$": "$.skills_plantuml_syntax_references_sequence_diagrams",
+                    "templates_architecture_diagram_template.$": "$.templates_architecture_diagram_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.diagram",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeDos",
+          "States": {
+            "InvokeDos": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "dos",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_DOS",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_dos_requirements_template.$": "$.templates_dos_requirements_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.dos",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeDpia",
+          "States": {
+            "InvokeDpia": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "dpia",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_DPIA",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_dpia_template.$": "$.templates_dpia_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.dpia",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeFinops",
+          "States": {
+            "InvokeFinops": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "finops",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_FINOPS",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_finops_template.$": "$.templates_finops_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.finops",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeFramework",
+          "States": {
+            "InvokeFramework": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "framework",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_FRAMEWORK",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_custom_framework_overview_template.$": "$.templates_custom_framework_overview_template",
+                    "templates_framework_overview_template.$": "$.templates_framework_overview_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.framework",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeGcloudClarify",
+          "States": {
+            "InvokeGcloudClarify": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "gcloud-clarify",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_GCLOUDCLARIFY",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_quality_checklist.$": "$.references_quality_checklist"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.gcloud_clarify",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeGcloudSearch",
+          "States": {
+            "InvokeGcloudSearch": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "gcloud-search",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_GCLOUDSEARCH",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_quality_checklist.$": "$.references_quality_checklist"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.gcloud_search",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeGcpResearch",
+          "States": {
+            "InvokeGcpResearch": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "gcp-research",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_GCPRESEARCH",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_gcp_research_template.$": "$.templates_gcp_research_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.gcp_research",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.batch2",
+      "Next": "IndependentBatch3"
+    },
+    "IndependentBatch3": {
+      "Type": "Parallel",
+      "Comment": "Independent commands batch 3 (10 commands)",
+      "Branches": [
+        {
+          "StartAt": "InvokeGlossary",
+          "States": {
+            "InvokeGlossary": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "glossary",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_GLOSSARY",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_glossary_template.$": "$.templates_glossary_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.glossary",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeGovCodeSearch",
+          "States": {
+            "InvokeGovCodeSearch": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "gov-code-search",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_GOVCODESEARCH",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_gov_code_search_template.$": "$.templates_gov_code_search_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.gov_code_search",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeGovLandscape",
+          "States": {
+            "InvokeGovLandscape": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "gov-landscape",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_GOVLANDSCAPE",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_gov_landscape_template.$": "$.templates_gov_landscape_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.gov_landscape",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeGovReuse",
+          "States": {
+            "InvokeGovReuse": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "gov-reuse",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_GOVREUSE",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_gov_reuse_template.$": "$.templates_gov_reuse_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.gov_reuse",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeGrants",
+          "States": {
+            "InvokeGrants": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "grants",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_GRANTS",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_grants_template.$": "$.templates_grants_template",
+                    "templates_tech_note_template.$": "$.templates_tech_note_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.grants",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeHealth",
+          "States": {
+            "InvokeHealth": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "health",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_HEALTH",
+                  "variables": {
+                    "health_config.$": "$.health_config",
+                    "input_architecture_docs.$": "$.input_architecture_docs"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.health",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeImpact",
+          "States": {
+            "InvokeImpact": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "impact",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_IMPACT",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.impact",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeInit",
+          "States": {
+            "InvokeInit": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "init",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_INIT",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.init",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeJsp936",
+          "States": {
+            "InvokeJsp936": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "jsp-936",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_JSP936",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "skills_mermaid_syntax_references_flowchart.$": "$.skills_mermaid_syntax_references_flowchart",
+                    "templates_jsp_936_template.$": "$.templates_jsp_936_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.jsp_936",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeMaturityModel",
+          "States": {
+            "InvokeMaturityModel": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "maturity-model",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_MATURITYMODEL",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_maturity_model_template.$": "$.templates_maturity_model_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.maturity_model",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.batch3",
+      "Next": "IndependentBatch4"
+    },
+    "IndependentBatch4": {
+      "Type": "Parallel",
+      "Comment": "Independent commands batch 4 (10 commands)",
+      "Branches": [
+        {
+          "StartAt": "InvokeMlops",
+          "States": {
+            "InvokeMlops": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "mlops",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_MLOPS",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_mlops_template.$": "$.templates_mlops_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.mlops",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeModSecure",
+          "States": {
+            "InvokeModSecure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "mod-secure",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_MODSECURE",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_mod_secure_by_design_template.$": "$.templates_mod_secure_by_design_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.mod_secure",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeOperationalize",
+          "States": {
+            "InvokeOperationalize": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "operationalize",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_OPERATIONALIZE",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_operationalize_template.$": "$.templates_operationalize_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.operationalize",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokePages",
+          "States": {
+            "InvokePages": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "pages",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_PAGES",
+                  "variables": {
+                    "....$": "$....",
+                    "CONTENT_BASE_URL.$": "$.CONTENT_BASE_URL",
+                    "DEFAULT_DOC.$": "$.DEFAULT_DOC",
+                    "REPO_URL.$": "$.REPO_URL",
+                    "REPO.$": "$.REPO",
+                    "VERSION.$": "$.VERSION",
+                    "docs_guides.$": "$.docs_guides",
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "templates_pages_template.$": "$.templates_pages_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.pages",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokePlatformDesign",
+          "States": {
+            "InvokePlatformDesign": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "platform-design",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_PLATFORMDESIGN",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_platform_design_template.$": "$.templates_platform_design_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.platform_design",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokePresentation",
+          "States": {
+            "InvokePresentation": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "presentation",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_PRESENTATION",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "skills_mermaid_syntax_references_c4.$": "$.skills_mermaid_syntax_references_c4",
+                    "skills_mermaid_syntax_references_gantt.$": "$.skills_mermaid_syntax_references_gantt",
+                    "skills_mermaid_syntax_references_pie.$": "$.skills_mermaid_syntax_references_pie",
+                    "skills_mermaid_syntax_references_quadrantChart.$": "$.skills_mermaid_syntax_references_quadrantChart",
+                    "templates_presentation_template.$": "$.templates_presentation_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.presentation",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokePrinciplesCompliance",
+          "States": {
+            "InvokePrinciplesCompliance": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "principles-compliance",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_PRINCIPLESCOMPLIANCE",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_principles_compliance_assessment_template.$": "$.templates_principles_compliance_assessment_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.principles_compliance",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeResearch",
+          "States": {
+            "InvokeResearch": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "research",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_RESEARCH",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_research_findings_template.$": "$.templates_research_findings_template",
+                    "templates_tech_note_template.$": "$.templates_tech_note_template",
+                    "templates_vendor_profile_template.$": "$.templates_vendor_profile_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.research",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeRoadmap",
+          "States": {
+            "InvokeRoadmap": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "roadmap",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_ROADMAP",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "skills_mermaid_syntax_references_flowchart.$": "$.skills_mermaid_syntax_references_flowchart",
+                    "skills_mermaid_syntax_references_gantt.$": "$.skills_mermaid_syntax_references_gantt",
+                    "templates_roadmap_template.$": "$.templates_roadmap_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.roadmap",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeScore",
+          "States": {
+            "InvokeScore": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "score",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_SCORE",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.score",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.batch4",
+      "Next": "IndependentBatch5"
+    },
+    "IndependentBatch5": {
+      "Type": "Parallel",
+      "Comment": "Independent commands batch 5 (10 commands)",
+      "Branches": [
+        {
+          "StartAt": "InvokeSearch",
+          "States": {
+            "InvokeSearch": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "search",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_SEARCH",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.search",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeSecure",
+          "States": {
+            "InvokeSecure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "secure",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_SECURE",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_ukgov_secure_by_design_template.$": "$.templates_ukgov_secure_by_design_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.secure",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeServiceAssessment",
+          "States": {
+            "InvokeServiceAssessment": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "service-assessment",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_SERVICEASSESSMENT",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_service_assessment_prep_template.$": "$.templates_service_assessment_prep_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.service_assessment",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeServicenow",
+          "States": {
+            "InvokeServicenow": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "servicenow",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_SERVICENOW",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_servicenow_design_template.$": "$.templates_servicenow_design_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.servicenow",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeStart",
+          "States": {
+            "InvokeStart": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "start",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_START",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.start",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeStory",
+          "States": {
+            "InvokeStory": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "story",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_STORY",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "skills_mermaid_syntax_references_flowchart.$": "$.skills_mermaid_syntax_references_flowchart",
+                    "skills_mermaid_syntax_references_gantt.$": "$.skills_mermaid_syntax_references_gantt",
+                    "skills_mermaid_syntax_references_mindmap.$": "$.skills_mermaid_syntax_references_mindmap",
+                    "skills_mermaid_syntax_references_pie.$": "$.skills_mermaid_syntax_references_pie",
+                    "skills_mermaid_syntax_references_timeline.$": "$.skills_mermaid_syntax_references_timeline",
+                    "templates_story_template.$": "$.templates_story_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.story",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeStrategy",
+          "States": {
+            "InvokeStrategy": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "strategy",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_STRATEGY",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "skills_mermaid_syntax_references_flowchart.$": "$.skills_mermaid_syntax_references_flowchart",
+                    "skills_mermaid_syntax_references_gantt.$": "$.skills_mermaid_syntax_references_gantt",
+                    "templates_architecture_strategy_template.$": "$.templates_architecture_strategy_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.strategy",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeTcop",
+          "States": {
+            "InvokeTcop": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "tcop",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_TCOP",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "templates_tcop_review_template.$": "$.templates_tcop_review_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.tcop",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeTemplateBuilder",
+          "States": {
+            "InvokeTemplateBuilder": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "template-builder",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_TEMPLATEBUILDER",
+                  "variables": {
+                    "community_{name.$": "$.community_{name",
+                    "guides_custom_{name.$": "$.guides_custom_{name",
+                    "guides_custom.$": "$.guides_custom",
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "templates_architecture_strategy_template.$": "$.templates_architecture_strategy_template",
+                    "templates_conformance_assessment_template.$": "$.templates_conformance_assessment_template",
+                    "templates_custom.$": "$.templates_custom",
+                    "templates_evaluation_criteria_template.$": "$.templates_evaluation_criteria_template",
+                    "templates_platform_design_template.$": "$.templates_platform_design_template",
+                    "templates_requirements_template.$": "$.templates_requirements_template",
+                    "templates.$": "$.templates"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.template_builder",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeTrello",
+          "States": {
+            "InvokeTrello": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "trello",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_TRELLO",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.trello",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.batch5",
+      "Next": "IndependentBatch6"
+    },
+    "IndependentBatch6": {
+      "Type": "Parallel",
+      "Comment": "Independent commands batch 6 (4 commands)",
+      "Branches": [
+        {
+          "StartAt": "InvokeWardley_climate",
+          "States": {
+            "InvokeWardley_climate": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "wardley.climate",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_WARDLEY_CLIMATE",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "skills_wardley_mapping_references_climatic_patterns.$": "$.skills_wardley_mapping_references_climatic_patterns",
+                    "skills_wardley_mapping_references_mathematical_models.$": "$.skills_wardley_mapping_references_mathematical_models",
+                    "templates_wardley_climate_template.$": "$.templates_wardley_climate_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.wardley_climate",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeWardley_doctrine",
+          "States": {
+            "InvokeWardley_doctrine": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "wardley.doctrine",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_WARDLEY_DOCTRINE",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "scripts_bash_create_project.$": "$.scripts_bash_create_project",
+                    "skills_wardley_mapping_references_doctrine.$": "$.skills_wardley_mapping_references_doctrine",
+                    "templates_wardley_doctrine_template.$": "$.templates_wardley_doctrine_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.wardley_doctrine",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeWardley_gameplay",
+          "States": {
+            "InvokeWardley_gameplay": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "wardley.gameplay",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_WARDLEY_GAMEPLAY",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "skills_wardley_mapping_references_gameplay_patterns.$": "$.skills_wardley_mapping_references_gameplay_patterns",
+                    "templates_wardley_gameplay_template.$": "$.templates_wardley_gameplay_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.wardley_gameplay",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "InvokeWardley_valueChain",
+          "States": {
+            "InvokeWardley_valueChain": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+                "Payload": {
+                  "step_name": "wardley.value-chain",
+                  "prompt_arn": "arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_WARDLEY_VALUECHAIN",
+                  "variables": {
+                    "input_architecture_docs.$": "$.input_architecture_docs",
+                    "references_citation_instructions.$": "$.references_citation_instructions",
+                    "references_quality_checklist.$": "$.references_quality_checklist",
+                    "scripts_bash_create_project.$": "$.scripts_bash_create_project",
+                    "skills_wardley_mapping_references_evolution_stages.$": "$.skills_wardley_mapping_references_evolution_stages",
+                    "templates_wardley_value_chain_template.$": "$.templates_wardley_value_chain_template"
+                  }
+                }
+              },
+              "ResultSelector": {
+                "output.$": "$.Payload.output",
+                "usage.$": "$.Payload.usage",
+                "latency_seconds.$": "$.Payload.latency_seconds"
+              },
+              "ResultPath": "$.wardley_value_chain",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 1,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.batch6",
+      "Next": "BuildFinalOutput"
+    },
+    "BuildFinalOutput": {
+      "Type": "Pass",
+      "Comment": "All 68 commands completed",
+      "End": true
+    }
+  }
+}

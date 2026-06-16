@@ -26,6 +26,9 @@ ENV/
 env/
 .venv
 
+# Node
+node_modules/
+
 # IDEs
 .vscode/
 .idea/
@@ -43,8 +46,34 @@ htmlcov/
 # Project specific
 *.log
 .arckit-debug/
+research/
+
+# Projects (created by arckit init, not part of the toolkit itself)
+projects/
 
 # Vendor proposals (may contain sensitive info)
 # Uncomment if you don't want to commit vendor documents
 # projects/*/vendors/*/proposal.pdf
 # projects/*/vendors/*/proprietary/
+
+# Legacy local directories (no longer generated)
+.codex/
+.opencode/
+
+
+# Gemini extension - generated files (static files are checked in)
+arckit-gemini/commands/
+arckit-gemini/templates/
+arckit-gemini/scripts/
+arckit-gemini/skills/
+arckit-gemini/docs/
+
+# Draft articles (not for version control)
+docs/articles/
+.tmp*
+
+# Git worktrees
+.worktrees/
+
+# Test output
+tests/*/output/

@@ -1,0 +1,1694 @@
+import os
+import re
+import json
+import shutil
+
+import yaml
+
+
+def build_agent_map(agents_dir):
+    """Build a map from command name to agent file path and content.
+
+    Agent files are named arckit-{name}.md. The corresponding plugin command
+    is {name}.md. Returns {command_filename: (agent_path, agent_prompt)}.
+    """
+    agent_map = {}
+    if not os.path.isdir(agents_dir):
+        return agent_map
+    for filename in os.listdir(agents_dir):
+        if filename.startswith("arckit-") and filename.endswith(".md"):
+            # arckit-research.md -> research.md
+            name = filename.replace("arckit-", "", 1).replace(".md", "")
+            command_filename = f"{name}.md"
+            agent_path = os.path.join(agents_dir, filename)
+            with open(agent_path, "r", encoding="utf-8") as f:
+                agent_content = f.read()
+            agent_prompt = extract_agent_prompt(agent_content)
+            agent_map[command_filename] = (agent_path, agent_prompt)
+    return agent_map
+
+
+def extract_frontmatter_and_prompt(content):
+    """Extract YAML frontmatter dict and prompt body from markdown."""
+    frontmatter = {}
+    prompt = content
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) > 2:
+            try:
+                frontmatter = yaml.safe_load(parts[1]) or {}
+            except yaml.YAMLError:
+                frontmatter = {}
+            prompt = parts[2].strip()
+    return frontmatter, prompt
+
+
+def extract_agent_prompt(content):
+    """Extract prompt body from agent file, stripping agent-specific frontmatter."""
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) > 2:
+            return parts[2].strip()
+    return content
+
+
+def copy_agent_stripped(src_path, dest_path):
+    """Copy an agent file to dest, stripping the effort field from frontmatter."""
+    with open(src_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) > 2:
+            try:
+                fm = yaml.safe_load(parts[1]) or {}
+            except yaml.YAMLError:
+                fm = {}
+            fm.pop("effort", None)
+            rebuilt = "---\n" + yaml.dump(fm, default_flow_style=False, allow_unicode=True) + "---" + parts[2]
+            with open(dest_path, "w", encoding="utf-8") as f:
+                f.write(rebuilt)
+            return
+    # No frontmatter — plain copy
+    with open(dest_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def render_handoffs_section(handoffs, command_format="/arckit:{cmd}"):
+    """Render handoffs list as a markdown Suggested Next Steps section."""
+    if not handoffs:
+        return ""
+    lines = [
+        "",
+        "## Suggested Next Steps",
+        "",
+        "After completing this command, consider running:",
+        "",
+    ]
+    for h in handoffs:
+        cmd = h.get("command", "")
+        desc = h.get("description", "")
+        cond = h.get("condition", "")
+        line = f"- `{command_format.format(cmd=cmd)}`"
+        if desc:
+            line += f" -- {desc}"
+        if cond:
+            line += f" *(when {cond})*"
+        lines.append(line)
+    lines.append("")
+    return "\n".join(lines)
+
+
+EXTENSION_FILE_ACCESS_BLOCK = """\
+**IMPORTANT — Gemini Extension File Access**:
+This command runs as a Gemini CLI extension. The extension directory \
+(`~/.gemini/extensions/arckit/`) is outside the workspace sandbox, so you \
+CANNOT use the read_file tool to access it. Instead:
+
+- To read templates/files: use a shell command, e.g. `cat ~/.gemini/extensions/arckit/templates/foo-template.md`
+- To list files: use `ls ~/.gemini/extensions/arckit/templates/`
+- To run scripts: use `python3 ~/.gemini/extensions/arckit/scripts/python/create-project.py --json`
+- To check file existence: use `test -f ~/.gemini/extensions/arckit/templates/foo-template.md && echo exists`
+All extension file access MUST go through shell commands.
+
+"""
+
+CONTEXT_HOOK_NOTE = (
+    "> **Note**: The ArcKit Project Context hook has already detected all "
+    "projects, artifacts, external documents, and global policies. Use that "
+    "context below \u2014 no need to scan directories manually."
+)
+
+CONTEXT_HOOK_REPLACEMENT = (
+    "> **Note**: Before generating, scan `projects/` for existing project "
+    "directories. For each project, list all `ARC-*.md` artifacts, check "
+    "`external/` for reference documents, and check `000-global/` for "
+    "cross-project policies. If no external docs exist but they would "
+    "improve output, ask the user."
+)
+
+
+# --- Agent configuration: adding a new AI target = adding a dictionary entry ---
+
+AGENT_CONFIG = {
+    "codex_extension": {
+        "name": "Codex Extension",
+        "output_dir": "arckit-codex/prompts",
+        "filename_pattern": "arckit.{name}.md",
+        "format": "markdown",
+        "path_prefix": ".arckit",
+        "extension_dir": "arckit-codex",
+        "copy_commands_to_extension": True,
+        "copy_agents_to_extension": True,
+        "has_context_hook": False,
+        "has_sync_guides_hook": False,
+    },
+    "codex_skills": {
+        "name": "Codex Skills",
+        "output_dir": "arckit-codex/skills",
+        "format": "skill",
+        "path_prefix": ".arckit",
+        "has_context_hook": False,
+        "has_sync_guides_hook": False,
+    },
+    "opencode": {
+        "name": "OpenCode CLI",
+        "output_dir": "arckit-opencode/commands",
+        "filename_pattern": "arckit.{name}.md",
+        "format": "markdown",
+        "path_prefix": ".arckit",
+        "extension_dir": "arckit-opencode",
+        "copy_agents_to_extension": True,
+        "has_context_hook": False,
+        "has_sync_guides_hook": False,
+    },
+    "gemini": {
+        "name": "Gemini CLI",
+        "output_dir": "arckit-gemini/commands/arckit",
+        "filename_pattern": "{name}.toml",
+        "format": "toml",
+        "path_prefix": "~/.gemini/extensions/arckit",
+        "arg_placeholder": "{{args}}",
+        "extension_dir": "arckit-gemini",
+        "prepend_block": EXTENSION_FILE_ACCESS_BLOCK,
+        "rewrite_read_instructions": True,
+        "has_context_hook": True,
+        "has_sync_guides_hook": False,
+    },
+    "copilot": {
+        "name": "Copilot",
+        "output_dir": "arckit-copilot/prompts",
+        "filename_pattern": "arckit-{name}.prompt.md",
+        "format": "prompt",
+        "path_prefix": ".arckit",
+        "arg_placeholder": "${input:topic:Enter project name or topic}",
+        "extension_dir": "arckit-copilot",
+        "copy_commands_to_extension": False,
+        "copy_agents_to_extension": False,
+        "has_context_hook": False,
+        "has_sync_guides_hook": False,
+    },
+    "paperclip": {
+        "name": "Paperclip",
+        "output_dir": "arckit-paperclip/src/data",
+        "format": "json",
+        "path_prefix": "scripts/bash",
+        "arg_placeholder": "{topic}",
+        "extension_dir": "arckit-paperclip",
+        "copy_commands_to_extension": False,
+        "copy_agents_to_extension": False,
+        "has_context_hook": False,
+        "has_sync_guides_hook": False,
+    },
+    "amazon_bedrock": {
+        "name": "Amazon Bedrock",
+        "output_dir": "arckit-bedrock/prompts",
+        "filename_pattern": "arckit-{name}.prompt.md",
+        "format": "bedrock",
+        "path_prefix": "",
+        "arg_placeholder": "{{input_architecture_docs}}",
+        "extension_dir": "arckit-bedrock",
+        "copy_commands_to_extension": False,
+        "copy_agents_to_extension": False,
+        "has_context_hook": False,
+        "has_sync_guides_hook": False,
+        "convert_paths_to_variables": True,
+    },
+}
+
+
+def _convert_paths_to_bedrock_vars(prompt):
+    """Convert file system paths to {{variable}} Bedrock template syntax.
+
+    In Amazon Bedrock Prompt Management there is no filesystem.
+    References to plugin files are replaced with {{variable}} placeholders.
+    """
+
+    def _path_to_var(path):
+        name = re.sub(r'\.[\w]+$', '', path)  # strip file extension
+        name = name.replace('/', '_').replace('-', '_').replace('.', '_')
+        name = re.sub(r'_+', '_', name).strip('_')
+        return '{{' + name + '}}'
+
+    result = prompt
+
+    # ${CLAUDE_PLUGIN_ROOT}/path/to/file.ext -> {{path_variable}}
+    result = re.sub(
+        r'\$\{CLAUDE_PLUGIN_ROOT\}/([^\s`\'"\)\]\n,]+)',
+        lambda m: _path_to_var(m.group(1)),
+        result,
+    )
+
+    # Also convert backtick-quoted .arckit/ paths -> {{variable}}
+    result = re.sub(
+        r'`\.arckit/([^`]+)`',
+        lambda m: '`' + _path_to_var(m.group(1)) + '`',
+        result,
+    )
+
+    return result
+
+
+def rewrite_paths(prompt, config):
+    """Rewrite ${CLAUDE_PLUGIN_ROOT} paths using agent config."""
+    if config.get("convert_paths_to_variables"):
+        # Bedrock mode: convert file paths to {{variable}} syntax
+        result = _convert_paths_to_bedrock_vars(prompt)
+    else:
+        result = prompt.replace("${CLAUDE_PLUGIN_ROOT}", config["path_prefix"])
+
+        if config.get("rewrite_read_instructions"):
+            result = re.sub(
+                r"Read `(" + re.escape(config["path_prefix"]) + r"/[^`]+)`",
+                r"Run `cat \1` to read the file",
+                result,
+            )
+
+    if config.get("prepend_block"):
+        result = config["prepend_block"] + result
+
+    if config.get("arg_placeholder"):
+        result = result.replace("$ARGUMENTS", config["arg_placeholder"])
+
+    return result
+
+
+def rewrite_hook_dependencies(prompt, config):
+    """Replace hook-dependent content for platforms without hooks."""
+    result = prompt
+
+    # Context injection: replace hook note with self-scan instructions
+    if not config.get("has_context_hook", False):
+        result = result.replace(CONTEXT_HOOK_NOTE, CONTEXT_HOOK_REPLACEMENT)
+
+    return result
+
+
+# Default Copilot tools for most ArcKit commands
+_COPILOT_DEFAULT_TOOLS = [
+    "readFile", "editFiles", "runCommand", "codebase", "search",
+]
+
+# Additional tools for research-heavy commands
+_COPILOT_RESEARCH_TOOLS = [
+    "fetch", "readFile", "editFiles", "runCommand", "codebase", "search",
+]
+
+
+def _copilot_tools_for_prompt(prompt):
+    """Determine Copilot tools based on prompt content."""
+    if any(kw in prompt for kw in ["WebSearch", "WebFetch", "web research",
+                                    "search the web", "fetch", "MCP"]):
+        return _COPILOT_RESEARCH_TOOLS
+    return _COPILOT_DEFAULT_TOOLS
+
+
+def format_output(description, prompt, fmt):
+    """Format into target format: 'markdown', 'toml', 'prompt', or 'skill'."""
+    if fmt == "toml":
+        prompt_escaped = prompt.replace("\\", "\\\\").replace('"', '\\"')
+        prompt_formatted = '"""\n' + prompt_escaped + '\n"""'
+        description_formatted = '"""\n' + description + '\n"""'
+        return f"description = {description_formatted}\nprompt = {prompt_formatted}\n"
+    elif fmt == "prompt":
+        escaped = description.replace("'", "''")
+        tools = _copilot_tools_for_prompt(prompt)
+        tools_yaml = "[" + ", ".join(f"'{t}'" for t in tools) + "]"
+        return (
+            f"---\n"
+            f"description: '{escaped}'\n"
+            f"agent: 'agent'\n"
+            f"tools: {tools_yaml}\n"
+            f"---\n\n"
+            f"{prompt}\n"
+        )
+    else:
+        escaped = description.replace("\\", "\\\\").replace('"', '\\"')
+        return f'---\ndescription: "{escaped}"\n---\n\n{prompt}\n'
+
+
+def format_json_entry(name, description, prompt, template_content, handoffs):
+    """Build a single JSON-serializable entry for commands.json."""
+    processed_handoffs = []
+    for h in (handoffs or []):
+        entry = {
+            "command": f"arckit-{h.get('command', '')}",
+            "description": h.get("description", ""),
+        }
+        if h.get("condition"):
+            entry["condition"] = h["condition"]
+        processed_handoffs.append(entry)
+
+    return {
+        "name": f"arckit-{name}",
+        "description": description,
+        "prompt": prompt,
+        "template": template_content,
+        "handoffs": processed_handoffs,
+    }
+
+
+def read_template_for_command(name, templates_dir):
+    """Read the template file for a command, if one exists.
+
+    Template naming convention: {name}-template.md
+    """
+    template_path = os.path.join(templates_dir, f"{name}-template.md")
+    if os.path.isfile(template_path):
+        with open(template_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return None
+
+
+def convert(commands_dir, agents_dir):
+    """Convert plugin commands to all configured AI agent formats.
+
+    Reads each plugin command once, resolves agent prompts once, then
+    writes output formats with appropriate path rewriting driven by AGENT_CONFIG.
+    """
+    for config in AGENT_CONFIG.values():
+        os.makedirs(config["output_dir"], exist_ok=True)
+
+    agent_map = build_agent_map(agents_dir)
+    counts = {agent_id: 0 for agent_id in AGENT_CONFIG}
+    paperclip_entries = []
+
+    for filename in sorted(os.listdir(commands_dir)):
+        if not filename.endswith(".md"):
+            continue
+
+        command_path = os.path.join(commands_dir, filename)
+
+        with open(command_path, "r", encoding="utf-8") as f:
+            command_content = f.read()
+
+        # Extract frontmatter from command (always use command's description)
+        frontmatter, command_prompt = extract_frontmatter_and_prompt(command_content)
+        description = frontmatter.get("description", "")
+        handoffs = frontmatter.get("handoffs", [])
+        # Strip effort field — only meaningful for Claude Code plugin
+        frontmatter.pop("effort", None)
+
+        # For agent-delegating commands, use the full agent prompt
+        # (non-Claude targets don't support the Task/agent architecture)
+        if filename in agent_map:
+            agent_path, agent_prompt = agent_map[filename]
+            prompt = agent_prompt
+            # Agent prompts don't contain $ARGUMENTS — append it so the
+            # user's query is injected into the generated command
+            if "$ARGUMENTS" not in prompt:
+                prompt += "\n\n## User Request\n\n```text\n$ARGUMENTS\n```\n"
+            source_label = f"{command_path} (agent: {agent_path})"
+        else:
+            prompt = command_prompt
+            source_label = command_path
+
+        base_name = filename.replace(".md", "")
+
+        # Collect entry for Paperclip JSON format
+        if "paperclip" in AGENT_CONFIG:
+            pc_config = AGENT_CONFIG["paperclip"]
+            pc_prompt = rewrite_paths(prompt, pc_config)
+            pc_prompt = rewrite_hook_dependencies(pc_prompt, pc_config)
+            template_content = read_template_for_command(
+                base_name,
+                os.path.join(os.path.dirname(commands_dir.rstrip(os.sep)), "templates"),
+            )
+            paperclip_entries.append(
+                format_json_entry(base_name, description, pc_prompt, template_content, handoffs)
+            )
+            counts["paperclip"] += 1
+
+        # Check for standalone command override once (result is agent-independent)
+        standalone_path = os.path.join(
+            os.path.dirname(commands_dir.rstrip(os.sep)), "commands-standalone", filename
+        )
+        has_standalone = os.path.isfile(standalone_path)
+        standalone_prompt = None
+        if has_standalone:
+            with open(standalone_path, "r", encoding="utf-8") as f:
+                standalone_content = f.read()
+            _, standalone_prompt = extract_frontmatter_and_prompt(standalone_content)
+
+        for agent_id, config in AGENT_CONFIG.items():
+            if config["format"] == "json":
+                continue  # Handled separately (single file for all commands)
+
+            if has_standalone and not config.get("has_sync_guides_hook", False):
+                # Use standalone version for platforms lacking required hook
+                rewritten = rewrite_paths(standalone_prompt, config)
+            else:
+                rewritten = rewrite_paths(prompt, config)
+                rewritten = rewrite_hook_dependencies(rewritten, config)
+
+            # Determine handoff command format based on target
+            # Bedrock prompts are self-contained; skip handoffs
+            if config["format"] == "bedrock":
+                handoffs_section = ""
+            else:
+                if config["format"] == "prompt":
+                    cmd_fmt = "/arckit-{cmd}"
+                elif config["format"] == "skill":
+                    cmd_fmt = "$arckit-{cmd}"
+                else:
+                    cmd_fmt = "/arckit:{cmd}"
+                handoffs_section = render_handoffs_section(handoffs, command_format=cmd_fmt)
+
+            if handoffs_section:
+                rewritten = rewritten.rstrip("\n") + "\n" + handoffs_section.rstrip("\n")
+
+            # For Copilot prompt format with agent-backed commands,
+            # generate a thin wrapper that references the .agent.md file
+            if config["format"] == "prompt" and filename in agent_map:
+                agent_name = filename.replace(".md", "")
+                agent_ref = f"arckit-{agent_name}"
+                escaped_desc = description.replace("'", "''")
+                tools = _copilot_tools_for_prompt(rewritten)
+                tools_yaml = "[" + ", ".join(f"'{t}'" for t in tools) + "]"
+
+                content = (
+                    f"---\n"
+                    f"description: '{escaped_desc}'\n"
+                    f"agent: '{agent_ref}'\n"
+                    f"tools: {tools_yaml}\n"
+                    f"---\n\n"
+                    f"Use the `{agent_ref}` agent to handle this request.\n"
+                )
+                if handoffs_section:
+                    content += "\n" + handoffs_section.strip("\n") + "\n"
+
+                out_filename = config["filename_pattern"].format(name=base_name)
+                out_path = os.path.join(config["output_dir"], out_filename)
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"  {config['name'] + ':':14s}{source_label} -> {out_path} (agent wrapper)")
+                counts[agent_id] += 1
+                continue
+
+            if config["format"] == "skill":
+                skill_name = f"arckit-{base_name}"
+                skill_dir = os.path.join(config["output_dir"], skill_name)
+                os.makedirs(skill_dir, exist_ok=True)
+                os.makedirs(os.path.join(skill_dir, "agents"), exist_ok=True)
+
+                escaped_desc = description.replace('"', '\\"')
+                skill_md = f'---\nname: {skill_name}\ndescription: "{escaped_desc}"\n---\n\n{rewritten}\n'
+                openai_yaml = "policy:\n  allow_implicit_invocation: false\n"
+
+                with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                    f.write(skill_md)
+                with open(os.path.join(skill_dir, "agents", "openai.yaml"), "w", encoding="utf-8") as f:
+                    f.write(openai_yaml)
+
+                print(f"  {config['name'] + ':':14s}{source_label} -> {skill_dir}/")
+                counts[agent_id] += 1
+            else:
+                content = format_output(description, rewritten, config["format"])
+                out_filename = config["filename_pattern"].format(name=base_name)
+                out_path = os.path.join(config["output_dir"], out_filename)
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"  {config['name'] + ':':14s}{source_label} -> {out_path}")
+                counts[agent_id] += 1
+
+    # Write Paperclip commands.json (single file for all commands)
+    if "paperclip" in AGENT_CONFIG and paperclip_entries:
+        pc_config = AGENT_CONFIG["paperclip"]
+        os.makedirs(pc_config["output_dir"], exist_ok=True)
+        out_path = os.path.join(pc_config["output_dir"], "commands.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(paperclip_entries, f, indent=2, ensure_ascii=False)
+        print(f"  {'Paperclip:':14s}Generated {out_path} ({len(paperclip_entries)} commands)")
+
+    return counts
+
+
+def copy_extension_files(plugin_dir):
+    """Copy supporting files from plugin to all extension directories.
+
+    Copies templates, scripts, guides, and skills so the extensions are
+    self-contained when published as separate repos.
+    """
+    copies = [
+        ("templates", "templates"),
+        ("scripts/bash", "scripts/bash"),
+        ("scripts/python", "scripts/python"),
+        ("docs/guides", "docs/guides"),
+        ("skills", "skills"),
+        ("references", "references"),
+    ]
+
+    for config in AGENT_CONFIG.values():
+        ext_dir = config.get("extension_dir")
+        if not ext_dir:
+            continue
+        print(f"Copying to {config['name']} extension ({ext_dir})...")
+        for src_rel, dst_rel in copies:
+            src = os.path.join(plugin_dir, src_rel)
+            dst = os.path.join(ext_dir, dst_rel)
+            if os.path.isdir(src):
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+                file_count = sum(len(files) for _, _, files in os.walk(dst))
+                print(f"  Copied: {src} -> {dst} ({file_count} files)")
+
+
+def copy_paperclip_files(plugin_dir, paperclip_dir):
+    """Copy bash scripts to Paperclip extension for utility tools."""
+    src = os.path.join(plugin_dir, "scripts", "bash")
+    dst = os.path.join(paperclip_dir, "scripts", "bash")
+    if os.path.isdir(src):
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        file_count = sum(len(files) for _, _, files in os.walk(dst))
+        print(f"  Copied: {src} -> {dst} ({file_count} files)")
+
+
+def generate_codex_config_toml(mcp_json_path, agents_dir, output_path):
+    """Generate config.toml for Codex extension with MCP servers and agent roles."""
+    lines = [
+        "# ArcKit Codex Extension Configuration",
+        "# Auto-generated by scripts/converter.py — do not edit directly",
+        "",
+    ]
+
+    # MCP servers section
+    if os.path.isfile(mcp_json_path):
+        with open(mcp_json_path, "r", encoding="utf-8") as f:
+            mcp_config = json.load(f)
+        servers = mcp_config.get("mcpServers", {})
+        if servers:
+            lines.append("# ── MCP Servers ─────────────────────────────────────")
+            lines.append("")
+            for name, server in servers.items():
+                lines.append(f"[mcp_servers.{name}]")
+                for key, value in server.items():
+                    if key == "headers":
+                        header_parts = []
+                        for hk, hv in value.items():
+                            header_parts.append(f'"{hk}" = "{hv}"')
+                        lines.append(f"headers = {{ {', '.join(header_parts)} }}")
+                    else:
+                        lines.append(f'{key} = "{value}"')
+                lines.append("")
+
+    # Agent roles section
+    if os.path.isdir(agents_dir):
+        agent_files = sorted(
+            f for f in os.listdir(agents_dir)
+            if f.startswith("arckit-") and f.endswith(".md")
+        )
+        if agent_files:
+            lines.append("# ── Agent Roles (experimental) ──────────────────────")
+            lines.append("# Requires: codex multi-agent feature flag enabled")
+            lines.append("")
+            lines.append("[agents]")
+            lines.append("max_threads = 3")
+            lines.append("max_depth = 1")
+            lines.append("job_max_runtime_seconds = 600")
+            lines.append("")
+
+            for filename in agent_files:
+                agent_path = os.path.join(agents_dir, filename)
+                with open(agent_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                frontmatter, _ = extract_frontmatter_and_prompt(content)
+                name = frontmatter.get("name", filename.replace(".md", ""))
+                desc = frontmatter.get("description", "")
+                first_line = desc.strip().split("\n")[0].strip()
+                toml_name = filename.replace(".md", "")
+
+                lines.append(f"[agents.{name}]")
+                escaped_desc = first_line.replace('"', '\\"')
+                lines.append(f'description = "{escaped_desc}"')
+                lines.append(f'config_file = "agents/{toml_name}.toml"')
+                lines.append("")
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print(f"  Generated: {output_path}")
+
+
+def generate_agent_toml_files(agents_dir, output_dir, path_prefix=".arckit"):
+    """Generate per-agent .toml config files for Codex extension."""
+    if not os.path.isdir(agents_dir):
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    count = 0
+
+    for filename in sorted(os.listdir(agents_dir)):
+        if not (filename.startswith("arckit-") and filename.endswith(".md")):
+            continue
+
+        agent_path = os.path.join(agents_dir, filename)
+        with open(agent_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        frontmatter, prompt = extract_frontmatter_and_prompt(content)
+        prompt = prompt.replace("${CLAUDE_PLUGIN_ROOT}", path_prefix)
+        prompt_escaped = prompt.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+
+        agent_name = frontmatter.get("name", filename.replace(".md", ""))
+
+        toml_name = filename.replace(".md", ".toml")
+        toml_path = os.path.join(output_dir, toml_name)
+
+        toml_content = (
+            f"# Auto-generated from arckit-claude/agents/{filename}\n"
+            f"# Do not edit — edit the source and re-run scripts/converter.py\n"
+            f"\n"
+            f'name = "{agent_name}"\n'
+            f"\n"
+            f'developer_instructions = """\n'
+            f"{prompt_escaped}\n"
+            f'"""\n'
+        )
+
+        with open(toml_path, "w", encoding="utf-8") as f:
+            f.write(toml_content)
+        count += 1
+
+    print(f"  Generated {count} agent .toml files in {output_dir}")
+
+
+def rewrite_codex_skills(skills_dir):
+    """Rewrite Claude Code-specific references in skills for Codex extension.
+
+    - /arckit:X -> $arckit-X (skill invocation syntax)
+    - /arckit.X -> $arckit-X
+    - /prompts:arckit.X -> $arckit-X
+    - Remove SessionStart hook references
+    - ${CLAUDE_PLUGIN_ROOT} -> .arckit
+    """
+    if not os.path.isdir(skills_dir):
+        return
+
+    count = 0
+    for root, dirs, files in os.walk(skills_dir):
+        for filename in files:
+            if not filename.endswith(".md"):
+                continue
+            filepath = os.path.join(root, filename)
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            original = content
+
+            # Rewrite /arckit:X -> $arckit-X (colon-prefixed plugin format)
+            content = re.sub(r"/arckit:(\w[\w.-]*)", r"$arckit-\1", content)
+
+            # Rewrite /arckit.X -> $arckit-X (dot-prefixed format)
+            # Only match when preceded by a space or start-of-line to avoid false matches
+            content = re.sub(
+                r"(?<=\s)/arckit\.(\w[\w.-]*)",
+                r"$arckit-\1",
+                content,
+            )
+
+            # Rewrite /prompts:arckit.X -> $arckit-X (old Codex prompt format)
+            content = re.sub(
+                r"/prompts:arckit\.(\w[\w.-]*)",
+                r"$arckit-\1",
+                content,
+            )
+
+            # Remove SessionStart hook reference
+            content = content.replace(
+                "- Use ArcKit Project Context from the SessionStart hook if available\n",
+                "",
+            )
+
+            # Rewrite plugin root paths
+            content = content.replace("${CLAUDE_PLUGIN_ROOT}", ".arckit")
+
+            if content != original:
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                rel_path = os.path.relpath(filepath, skills_dir)
+                print(f"  Rewrote: {skills_dir}/{rel_path}")
+                count += 1
+
+    if count:
+        print(f"  Rewrote {count} skill files for Codex skill invocation format")
+
+
+def generate_gemini_agents(agents_dir, output_dir):
+    """Generate Gemini CLI sub-agent markdown files from Claude Code agents.
+
+    Reads each arckit-{name}.md from agents_dir, converts the YAML frontmatter
+    (keeping name/description, dropping model, adding max_turns/timeout_mins),
+    rewrites paths and Read instructions for Gemini, prepends the extension
+    file access block, and writes to output_dir.
+    """
+    if not os.path.isdir(agents_dir):
+        print(f"  Skipped: {agents_dir} not found")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    gemini_path_prefix = "~/.gemini/extensions/arckit"
+    count = 0
+
+    for filename in sorted(os.listdir(agents_dir)):
+        if not (filename.startswith("arckit-") and filename.endswith(".md")):
+            continue
+
+        agent_path = os.path.join(agents_dir, filename)
+        with open(agent_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        frontmatter, prompt = extract_frontmatter_and_prompt(content)
+
+        # Build Gemini frontmatter: keep name/description, drop model,
+        # add Gemini-specific fields
+        gemini_fm = {}
+        if "name" in frontmatter:
+            gemini_fm["name"] = frontmatter["name"]
+        if "description" in frontmatter:
+            gemini_fm["description"] = frontmatter["description"]
+        gemini_fm["max_turns"] = 25
+        gemini_fm["timeout_mins"] = 10
+
+        # Rewrite paths: ${CLAUDE_PLUGIN_ROOT} -> ~/.gemini/extensions/arckit
+        prompt = prompt.replace("${CLAUDE_PLUGIN_ROOT}", gemini_path_prefix)
+
+        # Rewrite Read instructions to shell commands
+        prompt = re.sub(
+            r"Read `(" + re.escape(gemini_path_prefix) + r"/[^`]+)`",
+            r"Run `cat \1` to read the file",
+            prompt,
+        )
+
+        # Prepend extension file access block
+        prompt = EXTENSION_FILE_ACCESS_BLOCK + prompt
+
+        # Serialize frontmatter with yaml for correct multi-line handling
+        fm_str = yaml.dump(gemini_fm, default_flow_style=False, sort_keys=False).rstrip()
+        output_content = f"---\n{fm_str}\n---\n\n{prompt}\n"
+
+        out_path = os.path.join(output_dir, filename)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(output_content)
+        print(f"  {filename}")
+        count += 1
+
+    print(f"  Generated {count} Gemini sub-agent files in {output_dir}")
+
+
+def generate_gemini_hooks(output_dir):
+    """Generate hooks.json for Gemini CLI extension.
+
+    Creates arckit-gemini/hooks/hooks.json which tells Gemini CLI
+    which hook scripts to run for each lifecycle event.
+    """
+    hooks_dir = os.path.join(output_dir, "hooks")
+    os.makedirs(hooks_dir, exist_ok=True)
+
+    hooks_config = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3 ${extensionPath}/hooks/scripts/session-start.py",
+                            "name": "ArcKit Session Init",
+                            "timeout": 5000,
+                            "description": "Inject ArcKit version and project context",
+                        }
+                    ]
+                }
+            ],
+            "BeforeAgent": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3 ${extensionPath}/hooks/scripts/context-inject.py",
+                            "name": "ArcKit Context",
+                            "timeout": 10000,
+                            "description": "Inject project context before agent planning",
+                        }
+                    ]
+                }
+            ],
+            "BeforeTool": [
+                {
+                    "matcher": "write_file",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3 ${extensionPath}/hooks/scripts/validate-filename.py",
+                            "name": "ARC Filename Validator",
+                            "timeout": 5000,
+                            "description": "Validate ARC-xxx filename convention",
+                        }
+                    ],
+                },
+                {
+                    "matcher": "write_file|edit_file",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3 ${extensionPath}/hooks/scripts/file-protection.py",
+                            "name": "File Protection",
+                            "timeout": 5000,
+                            "description": "Protect ArcKit system files from modification",
+                        }
+                    ],
+                },
+            ],
+            "AfterTool": [
+                {
+                    "matcher": "write_file",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3 ${extensionPath}/hooks/scripts/update-manifest.py",
+                            "name": "Manifest Updater",
+                            "timeout": 5000,
+                            "description": "Update manifest.json after writing project files",
+                        }
+                    ]
+                }
+            ],
+        }
+    }
+
+    hooks_path = os.path.join(hooks_dir, "hooks.json")
+    with open(hooks_path, "w", encoding="utf-8") as f:
+        json.dump(hooks_config, f, indent=2)
+        f.write("\n")
+
+    print(f"  Generated: {hooks_path}")
+
+
+def generate_gemini_policies(output_dir):
+    """Generate policies/rules.toml for Gemini CLI extension."""
+    policies_dir = os.path.join(output_dir, "policies")
+    os.makedirs(policies_dir, exist_ok=True)
+
+    rules = '''\
+# ArcKit Gemini Extension Policies
+# Auto-generated by scripts/converter.py
+
+# Protect ArcKit extension files from modification
+[[rules]]
+description = "Prevent modification of ArcKit extension system files"
+when = "tool_name in ['write_file', 'edit_file'] and '~/.gemini/extensions/arckit/' in tool_input.get('path', '')"
+decision = "deny"
+reason = "Cannot modify ArcKit extension files. These are managed by the extension."
+
+# Warn on potential secret patterns in file content
+[[rules]]
+description = "Warn when writing files containing potential secrets"
+when = "tool_name == 'write_file' and any(p in tool_input.get('content', '') for p in ['PRIVATE KEY', 'password=', 'secret=', 'api_key='])"
+decision = "ask"
+reason = "File content may contain secrets. Please confirm this is intentional."
+'''
+
+    rules_path = os.path.join(policies_dir, "rules.toml")
+    with open(rules_path, "w", encoding="utf-8") as f:
+        f.write(rules)
+    print(f"  Generated: {rules_path}")
+
+
+def generate_copilot_agents(agents_dir, output_dir):
+    """Generate Copilot custom agent .agent.md files from Claude Code agents."""
+    if not os.path.isdir(agents_dir):
+        print(f"  Skipped: {agents_dir} not found")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    count = 0
+
+    for filename in sorted(os.listdir(agents_dir)):
+        if not (filename.startswith("arckit-") and filename.endswith(".md")):
+            continue
+
+        agent_path = os.path.join(agents_dir, filename)
+        with open(agent_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        frontmatter, prompt = extract_frontmatter_and_prompt(content)
+
+        copilot_fm = {}
+        if "name" in frontmatter:
+            copilot_fm["name"] = frontmatter["name"]
+        if "description" in frontmatter:
+            desc = frontmatter["description"].strip().split("\n")[0].strip()
+            copilot_fm["description"] = desc
+        copilot_fm["tools"] = _copilot_tools_for_prompt(prompt)
+        copilot_fm["user-invocable"] = False
+
+        prompt = prompt.replace("${CLAUDE_PLUGIN_ROOT}", ".arckit")
+        prompt = prompt.replace(CONTEXT_HOOK_NOTE, CONTEXT_HOOK_REPLACEMENT)
+
+        fm_str = yaml.dump(copilot_fm, default_flow_style=False, sort_keys=False).rstrip()
+        out_filename = filename.replace(".md", ".agent.md")
+        output_content = f"---\n{fm_str}\n---\n\n{prompt}\n"
+
+        out_path = os.path.join(output_dir, out_filename)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(output_content)
+        print(f"  {out_filename}")
+        count += 1
+
+    print(f"  Generated {count} Copilot agent files in {output_dir}")
+
+
+def generate_copilot_instructions(output_path):
+    """Generate copilot-instructions.md for Copilot repos using ArcKit."""
+    content = """\
+# ArcKit Enterprise Architecture Toolkit
+
+This project uses ArcKit for architecture governance. Available commands
+are in `.github/prompts/arckit-*.prompt.md` (type `/` in Copilot Chat).
+
+## Conventions
+
+- All architecture artifacts go in `projects/` directories (e.g., `projects/001-project-name/`)
+- Use `bash .arckit/scripts/bash/create-project.sh --json` to create numbered project dirs
+- Use `bash .arckit/scripts/bash/generate-document-id.sh` for document IDs (e.g., ARC-001-REQ-v1.0)
+- Templates are in `.arckit/templates/` (custom overrides in `.arckit/templates-custom/`)
+- Always write large documents to files (avoid output token limits)
+- Show only a summary to the user after generating artifacts
+
+## Document ID Format
+
+`ARC-{project}-{type}-v{version}` (e.g., `ARC-001-REQ-v1.0`)
+
+## Requirement ID Prefixes
+
+- BR-xxx: Business Requirements
+- FR-xxx: Functional Requirements
+- NFR-xxx: Non-Functional Requirements (NFR-P-xxx Performance, NFR-SEC-xxx Security)
+- INT-xxx: Integration Requirements
+- DR-xxx: Data Requirements
+
+## Project Structure
+
+```text
+projects/
+├── 000-global/          # Cross-project artifacts (principles, policies)
+└── 001-project-name/    # Numbered project directories
+    ├── ARC-001-REQ-v1.0.md
+    ├── ARC-001-STKE-v1.0.md
+    ├── external/        # Reference documents
+    └── vendors/         # Vendor evaluations
+```
+"""
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"  Generated: {output_path}")
+
+
+# Core governance flow: ordered dependency chain for Bedrock Flows.
+# Each tuple is (command_name, list_of_input/artifact_variables, list_of_dependency_commands).
+_BEDROCK_GOVERNANCE_FLOW = [
+    ("plan", ["{{input_architecture_docs}}"], []),
+    ("principles", ["{{input_principles}}"], []),
+    ("stakeholders", ["{{input_architecture_docs}}", "{{artifact_principles}}"], ["principles"]),
+    ("risk", ["{{input_architecture_docs}}", "{{artifact_stakeholders}}", "{{artifact_principles}}"], ["principles", "stakeholders"]),
+    ("sobc", ["{{input_architecture_docs}}", "{{artifact_stakeholders}}", "{{artifact_principles}}"], ["principles", "stakeholders"]),
+    ("requirements", ["{{input_architecture_docs}}", "{{artifact_stakeholders}}", "{{artifact_principles}}"], ["principles", "stakeholders"]),
+    ("data-model", ["{{input_architecture_docs}}", "{{artifact_stakeholders}}", "{{artifact_requirements}}", "{{artifact_sobc}}"], ["stakeholders", "requirements", "sobc"]),
+    ("wardley", ["{{input_architecture_docs}}", "{{artifact_principles}}", "{{artifact_requirements}}"], ["principles", "requirements"]),
+    ("sow", ["{{input_architecture_docs}}", "{{artifact_requirements}}", "{{artifact_principles}}"], ["requirements", "principles"]),
+    ("evaluate", ["{{input_architecture_docs}}", "{{artifact_principles}}", "{{artifact_requirements}}", "{{artifact_sow}}"], ["principles", "requirements", "sow"]),
+    ("hld-review", ["{{input_architecture_docs}}", "{{artifact_principles}}", "{{artifact_requirements}}", "{{artifact_sow}}"], ["principles", "requirements", "sow"]),
+    ("dld-review", ["{{input_architecture_docs}}", "{{artifact_hld_review}}", "{{artifact_principles}}", "{{artifact_requirements}}"], ["hld-review", "principles", "requirements"]),
+    ("traceability", ["{{input_architecture_docs}}", "{{artifact_requirements}}", "{{artifact_hld_review}}", "{{artifact_dld_review}}"], ["requirements", "hld-review", "dld-review"]),
+    ("analyze", ["{{artifact_principles}}", "{{artifact_stakeholders}}", "{{artifact_risk}}", "{{artifact_sobc}}", "{{artifact_requirements}}", "{{artifact_data_model}}", "{{artifact_sow}}", "{{artifact_hld}}", "{{artifact_dld}}"], ["principles", "stakeholders", "risk", "sobc", "requirements", "data-model", "sow", "hld-review", "dld-review"]),
+]
+
+
+def generate_bedrock_dependencies(prompts_dir, output_path):
+    """Generate bedrock-dependencies.md listing all commands and their variables.
+
+    Scans the generated Bedrock prompt files, extracts every {{variable}}
+    placeholder, and writes a structured markdown document that can later
+    be used to produce the Bedrock Flows JSON.
+    """
+    # Collect variables per command from generated files
+    command_vars = {}
+    if os.path.isdir(prompts_dir):
+        for filename in sorted(os.listdir(prompts_dir)):
+            if not filename.endswith(".prompt.md"):
+                continue
+            cmd_name = filename.replace("arckit-", "", 1).replace(".prompt.md", "")
+            filepath = os.path.join(prompts_dir, filename)
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            variables = sorted(set(re.findall(r'\{\{[^}]+\}\}', content)))
+            command_vars[cmd_name] = variables
+
+    lines = [
+        "# ArcKit Bedrock \u2014 Command Dependencies & Variables",
+        "",
+        "> Auto-generated by `scripts/converter.py` \u2014 do not edit directly.",
+        "> All 68 commands with their `{{variable}}` inputs for Amazon Bedrock Prompt Management.",
+        "",
+        "---",
+        "",
+        "## Core Governance Flow (Dependency Chain)",
+        "",
+        "These commands form the primary architecture governance pipeline,",
+        "where each step depends on artifacts from previous steps.",
+        "",
+        "| # | Command | Variables | Dependencies |",
+        "|---|---------|-----------|--------------|",
+    ]
+
+    for idx, (cmd, variables, deps) in enumerate(_BEDROCK_GOVERNANCE_FLOW, 1):
+        vars_str = " & ".join(f"`{v}`" for v in variables)
+        deps_str = ", ".join(deps) if deps else "None (entry point)"
+        lines.append(f"| {idx} | **{cmd}** | {vars_str} | {deps_str} |")
+
+    lines += [
+        "",
+        "---",
+        "",
+        "## All Commands \u2014 Variable Reference",
+        "",
+        "### Legend",
+        "",
+        "| Variable type | Description |",
+        "|---|---|",
+        "| `{{input_*}}` | User-provided input (architecture docs, topic, etc.) |",
+        "| `{{artifact_*}}` | Output from a previous command in the governance flow |",
+        "| `{{templates_*}}` | Template file embedded as variable |",
+        "| `{{references_*}}` | Reference/guidance file embedded as variable |",
+        "| `{{skills_*}}` | Skill/syntax reference embedded as variable |",
+        "| `{{scripts_*}}` | Script content embedded as variable |",
+        "| `{{*_config}}` | Configuration data |",
+        "",
+        "---",
+        "",
+    ]
+
+    governance_cmds = {cmd for cmd, _, _ in _BEDROCK_GOVERNANCE_FLOW}
+
+    # First list the governance flow commands in order
+    num = 0
+    for cmd, _, _ in _BEDROCK_GOVERNANCE_FLOW:
+        num += 1
+        variables = command_vars.get(cmd, [])
+        lines.append(f"### {num}. {cmd}")
+        lines.append("")
+        lines.append("```text")
+        for v in variables:
+            lines.append(v)
+        lines.append("```")
+        lines.append("")
+
+    # Then list remaining commands alphabetically
+    for cmd in sorted(command_vars.keys()):
+        if cmd in governance_cmds:
+            continue
+        num += 1
+        variables = command_vars[cmd]
+        lines.append(f"### {num}. {cmd}")
+        lines.append("")
+        lines.append("```text")
+        for v in variables:
+            lines.append(v)
+        lines.append("```")
+        lines.append("")
+
+    # Summary statistics
+    total = len(command_vars)
+    input_count = sum(1 for vs in command_vars.values() if any("input_" in v for v in vs))
+    qc_count = sum(1 for vs in command_vars.values() if any("quality_checklist" in v for v in vs))
+    cite_count = sum(1 for vs in command_vars.values() if any("citation_instructions" in v for v in vs))
+    tpl_count = sum(1 for vs in command_vars.values() if any("templates_" in v for v in vs))
+    skill_count = sum(1 for vs in command_vars.values() if any("skills_" in v for v in vs))
+    script_count = sum(1 for vs in command_vars.values() if any("scripts_" in v for v in vs))
+    minimal_count = sum(1 for vs in command_vars.values() if len(vs) == 1)
+
+    lines += [
+        "---",
+        "",
+        "## Summary Statistics",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        f"| Total commands | {total} |",
+        f"| Commands using `{{{{input_architecture_docs}}}}` | {input_count} |",
+        f"| Commands using `{{{{references_quality_checklist}}}}` | {qc_count} |",
+        f"| Commands using `{{{{references_citation_instructions}}}}` | {cite_count} |",
+        f"| Commands using `{{{{templates_*}}}}` | {tpl_count} |",
+        f"| Commands using `{{{{skills_*}}}}` | {skill_count} |",
+        f"| Commands using `{{{{scripts_*}}}}` | {script_count} |",
+        f"| Minimal commands (input only) | {minimal_count} |",
+        "",
+    ]
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print(f"  Generated: {output_path} ({total} commands)")
+
+
+def _cmd_to_state_name(cmd_name):
+    """Convert a command name like 'hld-review' to a CamelCase state name like 'HldReview'."""
+    return "".join(part.capitalize() for part in cmd_name.replace(".", "_").split("-"))
+
+
+def _cmd_to_result_key(cmd_name):
+    """Convert a command name like 'hld-review' to a snake_case key like 'hld_review'."""
+    return cmd_name.replace("-", "_").replace(".", "_")
+
+
+def _build_task_state(cmd_name, variables, result_path, is_end=False, next_state=None):
+    """Build an AWS Step Functions Task state for a single Bedrock command.
+
+    Mirrors the structure from the reference ar_principios.json:
+    - Lambda invoke with step_name, prompt_arn, variables
+    - ResultSelector for output/usage/latency
+    - Retry on TaskFailed
+    - TimeoutSeconds 900
+    """
+    state_name = _cmd_to_state_name(cmd_name)
+    result_key = _cmd_to_result_key(cmd_name)
+
+    # Build variable mappings using JSONPath references
+    var_mappings = {}
+    for var in variables:
+        # Strip {{ and }} to get the variable name
+        var_name = var.strip("{}")
+        # Determine the JSONPath source
+        if var_name.startswith("artifact_") or var_name.startswith("artifacts_"):
+            # Artifact from a previous governance step — reference the state output
+            source_key = var_name.replace("artifact_", "").replace("artifacts_", "")
+            var_mappings[var_name + ".$"] = "$." + source_key
+        else:
+            # Input or static variable — reference initial state input
+            var_mappings[var_name + ".$"] = "$." + var_name
+    state = {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::lambda:invoke",
+        "Parameters": {
+            "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:arckit-bedrock-invoke-lambda",
+            "Payload": {
+                "step_name": cmd_name,
+                "prompt_arn": f"arn:aws:bedrock:us-east-1:ACCOUNT_ID:prompt/PLACEHOLDER_{state_name.upper()}",
+                "variables": var_mappings,
+            },
+        },
+        "ResultSelector": {
+            "output.$": "$.Payload.output",
+            "usage.$": "$.Payload.usage",
+            "latency_seconds.$": "$.Payload.latency_seconds",
+        },
+        "ResultPath": "$." + result_path,
+        "TimeoutSeconds": 900,
+        "Retry": [
+            {
+                "ErrorEquals": ["States.TaskFailed"],
+                "IntervalSeconds": 30,
+                "MaxAttempts": 1,
+                "BackoffRate": 2,
+            }
+        ],
+    }
+    if is_end:
+        state["End"] = True
+    elif next_state:
+        state["Next"] = next_state
+    return state_name, state
+
+
+def generate_bedrock_step_functions_json(prompts_dir, output_path):
+    """Generate an AWS Step Functions state machine JSON for all 68 commands.
+
+    The JSON follows the same structure as the reference ar_principios.json:
+    - 14 governance commands run in phased dependency order (parallel where possible)
+    - 54 independent commands run in parallel batches alongside the governance flow
+    - Each command is a Lambda Task invoking Bedrock with prompt_arn and variables
+    """
+    # Collect variables per command from generated prompt files
+    command_vars = {}
+    if os.path.isdir(prompts_dir):
+        for filename in sorted(os.listdir(prompts_dir)):
+            if not filename.endswith(".prompt.md"):
+                continue
+            cmd_name = filename.replace("arckit-", "", 1).replace(".prompt.md", "")
+            filepath = os.path.join(prompts_dir, filename)
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            variables = sorted(set(re.findall(r'\{\{[^}]+\}\}', content)))
+            command_vars[cmd_name] = variables
+
+    governance_cmds = {cmd for cmd, _, _ in _BEDROCK_GOVERNANCE_FLOW}
+    independent_cmds = sorted(cmd for cmd in command_vars if cmd not in governance_cmds)
+
+    states = {}
+
+    # ── Build governance flow phases (same logic as reference JSON) ──
+
+    # Phase 1: Plan & Principles (parallel, no dependencies)
+    plan_name, plan_state = _build_task_state(
+        "plan", _BEDROCK_GOVERNANCE_FLOW[0][1], "plan", is_end=True
+    )
+    principles_name, principles_state = _build_task_state(
+        "principles", _BEDROCK_GOVERNANCE_FLOW[1][1], "principles", is_end=True
+    )
+    states["Phase1_PlanAndPrinciples"] = {
+        "Type": "Parallel",
+        "Comment": "Plan and Principles have no mutual dependency — run in parallel",
+        "Branches": [
+            {"StartAt": "Invoke" + plan_name, "States": {"Invoke" + plan_name: plan_state}},
+            {"StartAt": "Invoke" + principles_name, "States": {"Invoke" + principles_name: principles_state}},
+        ],
+        "ResultPath": "$.phase1",
+        "Next": "MergePhase1",
+    }
+    states["MergePhase1"] = {
+        "Type": "Pass",
+        "Comment": "Merge parallel outputs into a flat structure",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "input_principles.$": "$.input_principles",
+            "plan.$": "$.phase1[0].plan.output",
+            "principles.$": "$.phase1[1].principles.output",
+        },
+        "Next": "Phase2_Stakeholders",
+    }
+
+    # Phase 2: Stakeholders (depends on principles)
+    stakeholders_name, stakeholders_state = _build_task_state(
+        "stakeholders", _BEDROCK_GOVERNANCE_FLOW[2][1], "stakeholders_result",
+        next_state="AddStakeholders"
+    )
+    states["Phase2_Stakeholders"] = stakeholders_state
+    states["Phase2_Stakeholders"]["Next"] = "AddStakeholders"
+    states["AddStakeholders"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "input_principles.$": "$.input_principles",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders_result.output",
+        },
+        "Next": "Phase3_RiskSobcRequirements",
+    }
+
+    # Phase 3: Risk, SOBC, Requirements (parallel — all depend on stakeholders+principles)
+    risk_name, risk_state = _build_task_state(
+        "risk", _BEDROCK_GOVERNANCE_FLOW[3][1], "risk", is_end=True
+    )
+    sobc_name, sobc_state = _build_task_state(
+        "sobc", _BEDROCK_GOVERNANCE_FLOW[4][1], "sobc", is_end=True
+    )
+    req_name, req_state = _build_task_state(
+        "requirements", _BEDROCK_GOVERNANCE_FLOW[5][1], "requirements", is_end=True
+    )
+    states["Phase3_RiskSobcRequirements"] = {
+        "Type": "Parallel",
+        "Comment": "Risk, Sobc, Requirements can run in parallel (all depend on Stakeholders+Principles)",
+        "Branches": [
+            {"StartAt": "Invoke" + risk_name, "States": {"Invoke" + risk_name: risk_state}},
+            {"StartAt": "Invoke" + sobc_name, "States": {"Invoke" + sobc_name: sobc_state}},
+            {"StartAt": "Invoke" + req_name, "States": {"Invoke" + req_name: req_state}},
+        ],
+        "ResultPath": "$.phase3",
+        "Next": "MergePhase3",
+    }
+    states["MergePhase3"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "input_principles.$": "$.input_principles",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.phase3[0].risk.output",
+            "sobc.$": "$.phase3[1].sobc.output",
+            "requirements.$": "$.phase3[2].requirements.output",
+        },
+        "Next": "Phase4_DataModelWardleySow",
+    }
+
+    # Phase 4: DataModel, Wardley, Sow (parallel)
+    dm_name, dm_state = _build_task_state(
+        "data-model", _BEDROCK_GOVERNANCE_FLOW[6][1], "data_model", is_end=True
+    )
+    wardley_name, wardley_state = _build_task_state(
+        "wardley", _BEDROCK_GOVERNANCE_FLOW[7][1], "wardley", is_end=True
+    )
+    sow_name, sow_state = _build_task_state(
+        "sow", _BEDROCK_GOVERNANCE_FLOW[8][1], "sow", is_end=True
+    )
+    states["Phase4_DataModelWardleySow"] = {
+        "Type": "Parallel",
+        "Comment": "DataModel, Wardley, Sow can run in parallel",
+        "Branches": [
+            {"StartAt": "Invoke" + dm_name, "States": {"Invoke" + dm_name: dm_state}},
+            {"StartAt": "Invoke" + wardley_name, "States": {"Invoke" + wardley_name: wardley_state}},
+            {"StartAt": "Invoke" + sow_name, "States": {"Invoke" + sow_name: sow_state}},
+        ],
+        "ResultPath": "$.phase4",
+        "Next": "MergePhase4",
+    }
+    states["MergePhase4"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "input_principles.$": "$.input_principles",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.risk",
+            "sobc.$": "$.sobc",
+            "requirements.$": "$.requirements",
+            "data_model.$": "$.phase4[0].data_model.output",
+            "wardley.$": "$.phase4[1].wardley.output",
+            "sow.$": "$.phase4[2].sow.output",
+        },
+        "Next": "Phase5_EvaluateAndHldReview",
+    }
+
+    # Phase 5: Evaluate & HLD Review (parallel — both depend on sow)
+    eval_name, eval_state = _build_task_state(
+        "evaluate", _BEDROCK_GOVERNANCE_FLOW[9][1], "evaluate", is_end=True
+    )
+    hld_name, hld_state = _build_task_state(
+        "hld-review", _BEDROCK_GOVERNANCE_FLOW[10][1], "hld_review", is_end=True
+    )
+    states["Phase5_EvaluateAndHldReview"] = {
+        "Type": "Parallel",
+        "Comment": "Evaluate and HldReview both depend on Sow — run in parallel",
+        "Branches": [
+            {"StartAt": "Invoke" + eval_name, "States": {"Invoke" + eval_name: eval_state}},
+            {"StartAt": "Invoke" + hld_name, "States": {"Invoke" + hld_name: hld_state}},
+        ],
+        "ResultPath": "$.phase5",
+        "Next": "MergePhase5",
+    }
+    states["MergePhase5"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.risk",
+            "sobc.$": "$.sobc",
+            "requirements.$": "$.requirements",
+            "data_model.$": "$.data_model",
+            "wardley.$": "$.wardley",
+            "sow.$": "$.sow",
+            "evaluate.$": "$.phase5[0].evaluate.output",
+            "hld_review.$": "$.phase5[1].hld_review.output",
+        },
+        "Next": "Phase6_DldReview",
+    }
+
+    # Phase 6: DLD Review (depends on HLD Review)
+    dld_name, dld_state = _build_task_state(
+        "dld-review", _BEDROCK_GOVERNANCE_FLOW[11][1], "dld_review_result",
+        next_state="AddDldReview"
+    )
+    states["Phase6_DldReview"] = dld_state
+    states["Phase6_DldReview"]["Next"] = "AddDldReview"
+    states["AddDldReview"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.risk",
+            "sobc.$": "$.sobc",
+            "requirements.$": "$.requirements",
+            "data_model.$": "$.data_model",
+            "wardley.$": "$.wardley",
+            "sow.$": "$.sow",
+            "evaluate.$": "$.evaluate",
+            "hld_review.$": "$.hld_review",
+            "dld_review.$": "$.dld_review_result.output",
+        },
+        "Next": "Phase7_Traceability",
+    }
+
+    # Phase 7: Traceability (depends on DLD Review)
+    trace_name, trace_state = _build_task_state(
+        "traceability", _BEDROCK_GOVERNANCE_FLOW[12][1], "traceability_result",
+        next_state="AddTraceability"
+    )
+    states["Phase7_Traceability"] = trace_state
+    states["Phase7_Traceability"]["Next"] = "AddTraceability"
+    states["AddTraceability"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "input_architecture_docs.$": "$.input_architecture_docs",
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.risk",
+            "sobc.$": "$.sobc",
+            "requirements.$": "$.requirements",
+            "data_model.$": "$.data_model",
+            "wardley.$": "$.wardley",
+            "sow.$": "$.sow",
+            "evaluate.$": "$.evaluate",
+            "hld_review.$": "$.hld_review",
+            "dld_review.$": "$.dld_review",
+            "traceability.$": "$.traceability_result.output",
+        },
+        "Next": "Phase8_Analyze",
+    }
+
+    # Phase 8: Analyze (final aggregator — receives 9 upstream artifacts)
+    analyze_name, analyze_state = _build_task_state(
+        "analyze", _BEDROCK_GOVERNANCE_FLOW[13][1], "analyze_result",
+        next_state="BuildGovernanceOutput"
+    )
+    states["Phase8_Analyze"] = analyze_state
+    states["Phase8_Analyze"]["Comment"] = "Final aggregator — receives 9 upstream artifacts"
+    states["Phase8_Analyze"]["Next"] = "BuildGovernanceOutput"
+
+    states["BuildGovernanceOutput"] = {
+        "Type": "Pass",
+        "Parameters": {
+            "plan.$": "$.plan",
+            "principles.$": "$.principles",
+            "stakeholders.$": "$.stakeholders",
+            "risk.$": "$.risk",
+            "sobc.$": "$.sobc",
+            "requirements.$": "$.requirements",
+            "data_model.$": "$.data_model",
+            "wardley.$": "$.wardley",
+            "sow.$": "$.sow",
+            "evaluate.$": "$.evaluate",
+            "hld_review.$": "$.hld_review",
+            "dld_review.$": "$.dld_review",
+            "traceability.$": "$.traceability",
+            "analyze.$": "$.analyze_result.output",
+        },
+        "End": True,
+    }
+
+    # ── Build independent commands (non-governance) ──
+    # These commands have no inter-command dependencies and can all run in
+    # parallel. We batch them into groups of 10 to stay within Step Functions
+    # Parallel branch limits.
+
+    BATCH_SIZE = 10
+    independent_batches = []
+    for i in range(0, len(independent_cmds), BATCH_SIZE):
+        independent_batches.append(independent_cmds[i:i + BATCH_SIZE])
+
+    for batch_idx, batch in enumerate(independent_batches):
+        batch_branches = []
+        for cmd in batch:
+            variables = command_vars.get(cmd, [])
+            cmd_state_name, cmd_state = _build_task_state(
+                cmd, variables, _cmd_to_result_key(cmd), is_end=True
+            )
+            batch_branches.append({
+                "StartAt": "Invoke" + cmd_state_name,
+                "States": {"Invoke" + cmd_state_name: cmd_state},
+            })
+
+        batch_state_name = f"IndependentBatch{batch_idx + 1}"
+        next_batch = f"IndependentBatch{batch_idx + 2}" if batch_idx < len(independent_batches) - 1 else "BuildFinalOutput"
+
+        states[batch_state_name] = {
+            "Type": "Parallel",
+            "Comment": f"Independent commands batch {batch_idx + 1} ({len(batch)} commands)",
+            "Branches": batch_branches,
+            "ResultPath": f"$.batch{batch_idx + 1}",
+            "Next": next_batch,
+        }
+
+    # ── Top-level structure ──
+    # The governance flow and independent commands run sequentially:
+    # governance pipeline first, then independent batches.
+    # This keeps the JSON clean and avoids nested Parallel-of-Parallel limits.
+
+    # Rewire: governance output leads to first independent batch
+    if independent_batches:
+        states["BuildGovernanceOutput"]["End"] = False
+        states["BuildGovernanceOutput"]["Next"] = "IndependentBatch1"
+        del states["BuildGovernanceOutput"]["End"]
+
+    # Final output collects everything
+    final_params = {
+        "governance_flow.$": "$",
+    }
+    states["BuildFinalOutput"] = {
+        "Type": "Pass",
+        "Comment": f"All {len(command_vars)} commands completed",
+        "End": True,
+    }
+
+    state_machine = {
+        "Comment": f"ArcKit Architecture Pipeline — {len(command_vars)} prompts orchestrated via Step Functions + Bedrock Converse",
+        "StartAt": "Phase1_PlanAndPrinciples",
+        "States": states,
+    }
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(state_machine, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    print(f"  Generated: {output_path} ({len(command_vars)} commands, {len(states)} states)")
+
+
+if __name__ == "__main__":
+    commands_dir = "arckit-claude/commands/"
+    agents_dir = "arckit-claude/agents/"
+    plugin_dir = "arckit-claude"
+
+    print(
+        "Converting plugin commands to Codex, OpenCode, Gemini, Copilot, and Bedrock extension formats..."
+    )
+    print()
+    print(f"Source:       {commands_dir}")
+    print(f"Agents:       {agents_dir}")
+    for config in AGENT_CONFIG.values():
+        ext_dir = config.get("extension_dir")
+        if ext_dir:
+            print(f"{config['name'] + ' Ext:':14s}{ext_dir}/")
+    print()
+
+    # Copy extension supporting files BEFORE convert so reference skills
+    # are in place before command skills are generated on top
+    print("Copying extension supporting files...")
+    copy_extension_files(plugin_dir)
+
+    print()
+    counts = convert(commands_dir, agents_dir)
+
+    # Post-processing: copy commands and agents to extension directories
+    for agent_id, config in AGENT_CONFIG.items():
+        ext_dir = config.get("extension_dir")
+        if not ext_dir:
+            continue
+
+        if config.get("copy_commands_to_extension"):
+            ext_commands_dir = os.path.join(ext_dir, "commands")
+            os.makedirs(ext_commands_dir, exist_ok=True)
+            src_dir = config["output_dir"]
+            if os.path.isdir(src_dir):
+                for filename in sorted(os.listdir(src_dir)):
+                    if filename.endswith(".md"):
+                        shutil.copy2(
+                            os.path.join(src_dir, filename),
+                            os.path.join(ext_commands_dir, filename),
+                        )
+                print(
+                    f"  Copied {counts[agent_id]} commands to {config['name']} extension: {ext_commands_dir}"
+                )
+
+        if config.get("copy_agents_to_extension"):
+            # Copy agents to local dir (sibling of output_dir) and extension dir
+            local_agents_dir = os.path.join(
+                os.path.dirname(config["output_dir"]), "agents"
+            )
+            ext_agents_dir = os.path.join(ext_dir, "agents")
+            os.makedirs(local_agents_dir, exist_ok=True)
+            os.makedirs(ext_agents_dir, exist_ok=True)
+            if os.path.isdir(agents_dir):
+                for filename in sorted(os.listdir(agents_dir)):
+                    if filename.endswith(".md"):
+                        src_agent = os.path.join(agents_dir, filename)
+                        copy_agent_stripped(
+                            src_agent,
+                            os.path.join(local_agents_dir, filename),
+                        )
+                        copy_agent_stripped(
+                            src_agent,
+                            os.path.join(ext_agents_dir, filename),
+                        )
+                print(
+                    f"  Copied agents to {local_agents_dir} and {ext_agents_dir}"
+                )
+
+    print()
+    print("Generating Codex extension config...")
+    generate_codex_config_toml(
+        os.path.join(plugin_dir, ".mcp.json"),
+        agents_dir,
+        "arckit-codex/config.toml",
+    )
+    generate_agent_toml_files(
+        agents_dir,
+        "arckit-codex/agents",
+        path_prefix=".arckit",
+    )
+
+    print()
+    print("Rewriting Codex extension skills for Codex command format...")
+    rewrite_codex_skills("arckit-codex/skills")
+
+    print()
+    print("Generating Gemini CLI sub-agents...")
+    generate_gemini_agents(agents_dir, "arckit-gemini/agents")
+
+    print()
+    print("Generating Gemini extension hooks...")
+    generate_gemini_hooks("arckit-gemini")
+
+    print()
+    print("Generating Gemini extension policies...")
+    generate_gemini_policies("arckit-gemini")
+
+    print()
+    print("Generating Copilot custom agents...")
+    generate_copilot_agents(agents_dir, "arckit-copilot/agents")
+
+    print()
+    print("Generating Copilot instructions...")
+    generate_copilot_instructions("arckit-copilot/copilot-instructions.md")
+
+    print()
+    print("Copying Paperclip utility scripts...")
+    copy_paperclip_files(plugin_dir, "arckit-paperclip")
+
+    print()
+    print("Generating Bedrock dependencies reference...")
+    generate_bedrock_dependencies(
+        "arckit-bedrock/prompts",
+        "arckit-bedrock/bedrock-dependencies.md",
+    )
+
+    print()
+    print("Generating Bedrock Step Functions JSON...")
+    generate_bedrock_step_functions_json(
+        "arckit-bedrock/prompts",
+        "arckit-bedrock/bedrock-step-functions.json",
+    )
+
+    print()
+    total = sum(counts.values())
+    parts = " + ".join(
+        f"{counts[aid]} {cfg['name']}" for aid, cfg in AGENT_CONFIG.items()
+    )
+    print(f"Generated {parts} = {total} total files.")
