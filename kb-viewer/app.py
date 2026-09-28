@@ -9,6 +9,7 @@ Artifacts are auto-discovered from the ./artifacts/ directory.
 import hashlib
 import os
 import re
+import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -96,7 +97,7 @@ LOGIN_HTML = """<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ArcKit KB — Iniciar Sesión</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script nonce="{{CSP_NONCE}}" src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Inter', sans-serif; }
@@ -151,9 +152,10 @@ MAIN_HTML = """<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ArcKit KB — Base de Conocimiento</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script nonce="{{CSP_NONCE}}" src="https://cdn.tailwindcss.com"></script>
+    <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+    <script nonce="{{CSP_NONCE}}" defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Inter', sans-serif; }
@@ -451,7 +453,7 @@ MAIN_HTML = """<!DOCTYPE html>
     </div>
 </main>
 
-<script>
+<script nonce="{{CSP_NONCE}}">
 function kbApp(){
     return {
         currentView:'dashboard',
@@ -481,7 +483,7 @@ function kbApp(){
         },
         renderMarkdown(content){
             if(!content)return '';
-            return marked.parse(content);
+            return DOMPurify.sanitize(marked.parse(content));
         },
         async doSearch(){
             if(this.searchQuery.length<2)return;
@@ -514,16 +516,36 @@ function kbApp(){
 </html>"""
 
 
+def html_response(html: str) -> HTMLResponse:
+    nonce = secrets.token_urlsafe(16)
+    csp = (
+        "default-src 'none'; "
+        f"script-src 'nonce-{nonce}' 'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "form-action 'self'; "
+        "base-uri 'none'; "
+        "object-src 'none'; "
+        "frame-ancestors 'none'"
+    )
+    return HTMLResponse(
+        content=html.replace("{{CSP_NONCE}}", nonce),
+        headers={"Content-Security-Policy": csp, "X-Content-Type-Options": "nosniff"},
+    )
+
+
 # --- Routes ---
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
     user = get_current_user(request)
     if not user:
         html = LOGIN_HTML.replace("{{ERROR_BLOCK}}", "")
-        return HTMLResponse(content=html)
+        return html_response(html)
     html = MAIN_HTML.replace("{{USER_INITIAL}}", user["name"][0])
     html = html.replace("{{USER_FIRSTNAME}}", user["name"].split(" ")[0])
-    return HTMLResponse(content=html)
+    return html_response(html)
 
 
 @app.post("/login")
@@ -532,11 +554,11 @@ async def login(request: Request, email: str = Form(...), password: str = Form(.
     if email_normalized not in AUTHORIZED_USERS:
         error_block = '<div class="mb-6 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">Usuario no autorizado. Contacte al administrador.</div>'
         html = LOGIN_HTML.replace("{{ERROR_BLOCK}}", error_block)
-        return HTMLResponse(content=html)
+        return html_response(html)
     if hash_password(password) != DEFAULT_PASSWORD_HASH:
         error_block = '<div class="mb-6 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">Contraseña incorrecta.</div>'
         html = LOGIN_HTML.replace("{{ERROR_BLOCK}}", error_block)
-        return HTMLResponse(content=html)
+        return html_response(html)
     token = create_access_token({"sub": email_normalized})
     response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
