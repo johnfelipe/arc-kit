@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`owm-parse.mjs` parses hostile OWM in linear time.** Crafted long lines no longer hang `/arckit:wardley` and `/arckit:archify` renders; lines over 1,000 characters are ignored with a warning and sources over 1,000,000 characters are rejected.
+
 - **`/arckit:pages`: large PlantUML diagrams render** (#648). Deflate encoding in place of hex, so URLs are several times shorter; a diagram still too large says so instead of blaming its syntax.
 
 - **Overlay recipes' `skill:` steps are namespaced when published** (#835), so `/arckit:build` can run them from a marketplace install.

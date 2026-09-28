@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 
-const { parseOwm, stageFor, EVOLUTION_STAGES } = await import(
+const { parseOwm, stageFor, EVOLUTION_STAGES, MAX_LINE_LENGTH, MAX_SOURCE_LENGTH } = await import(
   resolve('plugins/arckit-claude/scripts/owm-parse.mjs')
 );
 const { renderHtml, convert } = await import(
@@ -391,4 +391,42 @@ test("#851: the command's own worked-example OWM parses with no warnings", () =>
   assert.equal(map.notes.length, 1);
   assert.equal(map.links.length, 4);
   assert.deepEqual(map.pipelines[0].children, ['Text-Based Guidance', 'Conversational AI Guidance']);
+});
+
+// ── Input bounds ───────────────────────────────────────────────────────────
+
+test('crafted whitespace-heavy lines parse in linear time', () => {
+  const pad = ' '.repeat(MAX_LINE_LENGTH - 20);
+  const hostile = [
+    `component ${pad}x`,
+    `anchor a${pad}x`,
+    `pipeline ${pad}x`,
+    `evolve ${pad}x`,
+    `note ${pad}x`,
+    `a${pad}x`,
+    `annotation 1 [${'1'.repeat(MAX_LINE_LENGTH - 20)}]`,
+  ];
+  for (const line of hostile) {
+    const source = Array(Math.floor(MAX_SOURCE_LENGTH / (line.length + 1))).fill(line).join('\n');
+    const started = performance.now();
+    parseOwm(source);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 2000, `${JSON.stringify(line.slice(0, 12))}… took ${elapsed.toFixed(0)} ms`);
+  }
+});
+
+test('a line over MAX_LINE_LENGTH is ignored with a warning', () => {
+  const map = parseOwm(`component A [0.5, 0.5]\ncomponent ${'x'.repeat(MAX_LINE_LENGTH)} [0.1, 0.1]`);
+  assert.deepEqual(map.components.map((c) => c.name), ['A']);
+  assert.ok(map.warnings.some((w) => w.startsWith('Line 2 is ') && w.endsWith('ignored.')));
+});
+
+test('a source over MAX_SOURCE_LENGTH is rejected', () => {
+  assert.throws(() => parseOwm('x'.repeat(MAX_SOURCE_LENGTH + 1)), RangeError);
+});
+
+test('Unicode line separators split lines', () => {
+  const map = parseOwm('component A [0.5, 0.5]\u2028component B [0.4, 0.4]\rA -> B');
+  assert.deepEqual(map.components.map((c) => c.name), ['A', 'B']);
+  assert.equal(map.links.length, 1);
 });

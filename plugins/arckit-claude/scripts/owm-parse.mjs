@@ -35,10 +35,20 @@ export function stageFor(evo) {
   return EVOLUTION_STAGES[EVOLUTION_STAGES.length - 1].name;
 }
 
+/**
+ * Input bounds. Real maps are a few KB with lines well under 200 characters;
+ * the caps keep regex matching cost bounded on hostile input.
+ */
+export const MAX_SOURCE_LENGTH = 1_000_000;
+export const MAX_LINE_LENGTH = 1_000;
+
 /** Strip a trailing `// comment`, leaving `://` inside URLs intact. */
 function stripInlineComment(line) {
-  const m = line.match(/^(.+?)\s+\/\/(?!\/)(.*)$/);
-  if (m && !m[1].includes('://')) return m[1].trim();
+  const at = line.search(/\s\/\/(?!\/)/);
+  if (at > 0) {
+    const head = line.slice(0, at).trim();
+    if (!head.includes('://')) return head;
+  }
   return line;
 }
 
@@ -52,25 +62,28 @@ function unquote(name) {
   return trimmed;
 }
 
-const COMPONENT_RE = /^(component|anchor)\s+(.+?)\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\]\s*(.*)$/i;
+// Names are matched as `\s+(?=\S)(.*?\S)`: the lookahead stops the keyword's
+// whitespace from backtracking, and a name that must end on a non-space cannot
+// stop inside a whitespace run, so matching stays linear in the line length.
+const COMPONENT_RE = /^(component|anchor)\s+(?=\S)(.*?\S)\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\]\s*(.*)$/i;
 // A pipeline child declared inside a `{ … }` block carries only an evolution
 // coordinate; its visibility is the parent's. `/arckit:wardley`'s own worked
 // example uses this form (`component "Text-Based Guidance" [0.25]`), and
 // owm-to-mermaid.mjs emits it, so rejecting it desynchronised the HTML and
 // Mermaid renderings of the same map.
-const COMPONENT_EVO_ONLY_RE = /^(component|anchor)\s+(.+?)\s*\[\s*(-?[\d.]+)\s*\]\s*(.*)$/i;
-const PIPELINE_COORD_RE = /^pipeline\s+(.+?)\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\]\s*$/i;
-const PIPELINE_BARE_RE = /^pipeline\s+(.+?)(?:\s*\{)?\s*$/i;
-const EVOLVE_RE = /^evolve\s+(.+?)\s+(-?[\d.]+)\s*(?:label\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\])?\s*(?:label\s+(.+))?$/i;
-const LINK_RE = /^(.+?)\s*(->|\+>|\+<>)\s*(.+)$/;
+const COMPONENT_EVO_ONLY_RE = /^(component|anchor)\s+(?=\S)(.*?\S)\s*\[\s*(-?[\d.]+)\s*\]\s*(.*)$/i;
+const PIPELINE_COORD_RE = /^pipeline\s+(?=\S)(.*?\S)\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\]\s*$/i;
+const PIPELINE_BARE_RE = /^pipeline\s+(?=\S)(.*?\S)(?:\s*\{)?\s*$/i;
+const EVOLVE_RE = /^evolve\s+(?=\S)(.*?\S)\s+(-?[\d.]+)\s*(?:label\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\])?\s*(?:label\s+(.+))?$/i;
+const LINK_RE = /^(.*?\S)\s*(->|\+>|\+<>)\s*(.+)$/;
 // `annotation 1 [v, e] text` and the comma form `annotation 1,[v, e] "text"`
 // are both current OWM; the second is what owm-to-mermaid.mjs re-emits and what
 // the worked example in commands/wardley.md uses. The coordinate group is
 // greedy so a multi-point `[[v,e],[v,e]]` list is captured whole rather than
 // truncated at the first `]`.
-const ANNOTATION_RE = /^annotation\s+(\d+)\s*,?\s*\[(.+)\]\s*(.*)$/i;
+const ANNOTATION_RE = /^annotation\s+(\d+)\s*(?:,\s*)?\[(.+)\]\s*(.*)$/i;
 const ANNOTATIONS_BOX_RE = /^annotations\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\]\s*$/i;
-const NOTE_RE = /^note\s+(.+?)\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\]\s*$/i;
+const NOTE_RE = /^note\s+(?=\S)(.*?\S)\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\]\s*$/i;
 const SOURCING_RE = /^(build|buy|outsource)\s+(.+)$/i;
 const LABEL_RE = /\blabel\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\]/i;
 const TITLE_RE = /^title\s+(.+)$/i;
@@ -104,7 +117,7 @@ function parseLink(match, byName) {
 /**
  * Parse OWM text.
  *
- * @param {string} source OWM source text.
+ * @param {string} source OWM source text, at most MAX_SOURCE_LENGTH characters.
  * @returns {{
  *   title: string|null,
  *   components: Array<object>,
@@ -115,9 +128,18 @@ function parseLink(match, byName) {
  *   notes: Array<{text: string, vis: number, evo: number}>,
  *   warnings: string[]
  * }}
+ * @throws {RangeError} When the source exceeds MAX_SOURCE_LENGTH.
  */
 export function parseOwm(source) {
-  const lines = String(source ?? '').split('\n');
+  const text = String(source ?? '');
+  if (text.length > MAX_SOURCE_LENGTH) {
+    throw new RangeError(
+      `OWM source is ${text.length} characters; the limit is ${MAX_SOURCE_LENGTH}.`
+    );
+  }
+  // Split on every JS line terminator so `.` in the line regexes matches any
+  // character of a line and a trailing `(.*)$` can never fail and backtrack.
+  const lines = text.split(/\r\n|[\n\r\u2028\u2029]/);
   const warnings = [];
 
   let title = null;
@@ -138,7 +160,7 @@ export function parseOwm(source) {
 
   for (const raw of lines) {
     let line = raw.trim();
-    if (!line || line.startsWith('//')) continue;
+    if (!line || line.startsWith('//') || line.length > MAX_LINE_LENGTH) continue;
     line = stripInlineComment(line);
     if (!line) continue;
 
@@ -245,9 +267,15 @@ export function parseOwm(source) {
   // ── Pass 2: links, evolve, annotations, notes, title.
   //    Deferred so forward references to components resolve.
   let inBlock = false;
-  for (const raw of lines) {
-    let line = raw.trim();
+  for (let index = 0; index < lines.length; index += 1) {
+    let line = lines[index].trim();
     if (!line || line.startsWith('//')) continue;
+    if (line.length > MAX_LINE_LENGTH) {
+      warnings.push(
+        `Line ${index + 1} is ${line.length} characters (limit ${MAX_LINE_LENGTH}); ignored.`
+      );
+      continue;
+    }
     line = stripInlineComment(line);
     if (!line) continue;
 
@@ -286,7 +314,8 @@ export function parseOwm(source) {
     if (mAnn) {
       const points = [];
       // Either `[vis, evo]` or `[[v1, e1], [v2, e2]]`.
-      const coordPairs = mAnn[2].matchAll(/(-?[\d.]+)\s*,\s*(-?[\d.]+)/g);
+      // Start only at the head of a number so a long digit run is scanned once.
+      const coordPairs = mAnn[2].matchAll(/(?:(?<![\d.])|(?=-))(-?[\d.]+)\s*,\s*(-?[\d.]+)/g);
       for (const pair of coordPairs) {
         points.push({ vis: parseFloat(pair[1]), evo: parseFloat(pair[2]) });
       }

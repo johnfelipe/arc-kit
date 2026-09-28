@@ -722,7 +722,14 @@ function main(argv) {
     process.exit(2);
   }
 
-  const map = parseOwm(source);
+  let map;
+  try {
+    map = parseOwm(source);
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    console.error(`owm-to-html: ${input}: ${error.message}`);
+    process.exit(2);
+  }
   if (!map.components.length) {
     console.error('owm-to-html: no components found — is this an OWM file?');
     process.exit(1);
