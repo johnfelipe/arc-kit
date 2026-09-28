@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -352,7 +352,24 @@ function isUnderPluginRoot(filePath) {
 
 function isArcKitTempfile(filePath) {
   return typeof filePath === "string"
-    && /^\/tmp\/(?:arckit-)?[a-z][a-z0-9-]*-handoff(?:-[a-z][a-z0-9-]*)?[A-Za-z0-9.-]*\.json$/.test(filePath);
+    && /^\/tmp\/(?:arckit-)?[a-z][a-z0-9-]*-handoff(?:-[a-z][a-z0-9-]*)?[A-Za-z0-9.-]*\.json$/.test(filePath)
+    && isOwnedRegularFile(filePath);
+}
+
+// /tmp is shared: reject symlinks, hard links and files owned by other users.
+function isOwnedRegularFile(filePath) {
+  if (typeof process.getuid !== "function") {
+    return false;
+  }
+  try {
+    const stats = lstatSync(filePath);
+    if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1 || stats.uid !== process.getuid()) {
+      return false;
+    }
+    return realpathSync(filePath) === resolve(realpathSync(dirname(filePath)), basename(filePath));
+  } catch {
+    return false;
+  }
 }
 
 function escapeRegex(text) {
