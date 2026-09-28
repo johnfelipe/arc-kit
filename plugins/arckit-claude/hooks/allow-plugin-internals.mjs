@@ -10,9 +10,12 @@
  *
  * This hook auto-approves PermissionRequests for:
  *   - Read against any path under the plugin root
- *   - Bash invocations whose command string contains a path under
- *     ${CLAUDE_PLUGIN_ROOT}/scripts/ (validate-handoff.mjs,
- *     scripts/bash/*.sh helpers)
+ *   - Bash commands that are a single bare invocation of an allowlisted
+ *     ${CLAUDE_PLUGIN_ROOT}/scripts/ helper (validate-handoff.mjs,
+ *     scripts/bash/*.sh helpers), optionally prefixed by node/bash/sh.
+ *     Commands with shell operators (; && || | & > < `...` $(...)),
+ *     multiple lines, or secret/protected-path arguments are not
+ *     auto-allowed.
  *
  * Anything else (Read of project files, Bash for arbitrary commands,
  * Write of project artefacts, etc.) falls through to the normal
@@ -42,8 +45,6 @@ import { basename, dirname, resolve } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, '..');
 const SCRIPTS_DIR = resolve(PLUGIN_ROOT, 'scripts');
-
-main();
 
 function main() {
   let raw = '';
@@ -97,54 +98,169 @@ function isUnderPluginRoot(p) {
   return abs === root || abs.startsWith(root + '/');
 }
 
+const KNOWN_SCRIPTS = new Set([
+  'validate-handoff.mjs',
+  'generate-document-id.mjs',
+  'bash/common.sh',
+  'bash/create-project.sh',
+  'bash/generate-document-id.sh',
+  'bash/check-prerequisites.sh',
+  'bash/list-projects.sh',
+  'bash/migrate-filenames.sh',
+  'bash/detect-stale-artifacts.sh',
+]);
+
+const SCRIPT_PREFIXES = [
+  SCRIPTS_DIR.replaceAll('\\', '/') + '/',
+  '${CLAUDE_PLUGIN_ROOT}/scripts/',
+  '$CLAUDE_PLUGIN_ROOT/scripts/',
+];
+
+const INTERPRETERS = {
+  node: /\.mjs$/,
+  bash: /\.sh$/,
+  sh: /\.sh$/,
+};
+
+const SECRET_PATTERNS = [
+  /\bsk-[A-Za-z0-9_-]{20,}/,
+  /\bAKIA[0-9A-Z]{16}\b/,
+  /\bgh[pousr]_[A-Za-z0-9_]{20,}/,
+  /\bAIza[0-9A-Za-z_-]{30,}/,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}/,
+  /\bntn_[A-Za-z0-9]{40,}/,
+  /\bATATT[A-Za-z0-9]{20,}/,
+  /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/,
+];
+
+const PROTECTED_BASENAMES = new Set([
+  '.env', '.envrc', '.npmrc', '.pypirc', '.netrc', '.secrets',
+  'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',
+  'credentials', 'credentials.json', 'service-account.json',
+  'secrets.json', 'secrets.yaml', 'secrets.yml',
+]);
+const PROTECTED_DIRS = new Set(['.ssh', '.aws', '.gnupg', '.git']);
+const PROTECTED_EXTENSIONS = ['.pem', '.key', '.p12', '.pfx', '.keystore'];
+
+/**
+ * True only when `cmd` is a single, bare invocation of an allowlisted
+ * plugin helper script — optionally prefixed by its interpreter — with
+ * plain arguments. Any shell operator, redirection, command substitution,
+ * glob, comment or additional statement makes the command ineligible, as
+ * does an argument that looks like secret material or a protected path.
+ */
 function commandTouchesPluginScripts(cmd) {
-  if (!cmd || typeof cmd !== 'string') return false;
-  // Two trust markers — either form qualifies:
-  //   1. Resolved absolute path: /.../arckit-claude/scripts/...
-  //   2. Env-var literal: ${CLAUDE_PLUGIN_ROOT}/scripts/... — Claude
-  //      Code passes the LLM-emitted command to the hook with the env
-  //      var unexpanded; bash expands at execution time.
-  // An attacker-forged command can't fabricate the real plugin path,
-  // and ${CLAUDE_PLUGIN_ROOT} is a sentinel string the LLM only emits
-  // when the prompt instructed it to use plugin-internal helpers.
-  const PREFIXES = [
-    SCRIPTS_DIR.replaceAll('\\', '/') + '/',
-    '${CLAUDE_PLUGIN_ROOT}/scripts/',
-  ];
-  let anyPrefixHit = false;
-  for (const p of PREFIXES) if (cmd.includes(p)) { anyPrefixHit = true; break; }
-  if (!anyPrefixHit) return false;
+  const argv = tokenizeSimpleCommand(cmd);
+  if (!argv || argv.length === 0) return false;
 
-  const KNOWN = new Set([
-    'validate-handoff.mjs',
-    'generate-document-id.mjs',
-    'bash/common.sh',
-    'bash/create-project.sh',
-    'bash/generate-document-id.sh',
-    'bash/check-prerequisites.sh',
-    'bash/list-projects.sh',
-    'bash/migrate-filenames.sh',
-    'bash/detect-stale-artifacts.sh',
-  ]);
+  let scriptIndex = 0;
+  const interpreter = Object.hasOwn(INTERPRETERS, argv[0]) ? argv[0] : null;
+  if (interpreter) scriptIndex = 1;
 
-  // Collect every "scripts/<filename>" reference in the command string,
-  // regardless of which prefix introduces it. If any reference points
-  // to a filename NOT in the allowlist, refuse to auto-allow.
-  const refs = [];
-  for (const prefix of PREFIXES) {
-    const re = new RegExp(escapeRegex(prefix) + '([A-Za-z0-9_./-]+)', 'g');
-    const matches = [...cmd.matchAll(re)];
-    for (const m of matches) refs.push(m[1]);
-  }
-  if (refs.length === 0) return false;
-  for (const tail of refs) {
-    if (!KNOWN.has(tail)) return false;
-  }
+  const script = allowlistedScript(argv[scriptIndex]);
+  if (!script) return false;
+  if (interpreter && !INTERPRETERS[interpreter].test(script)) return false;
+
+  if (SECRET_PATTERNS.some((re) => re.test(cmd))) return false;
+  if (argv.slice(scriptIndex + 1).some(looksProtected)) return false;
   return true;
 }
 
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function allowlistedScript(token) {
+  if (typeof token !== 'string') return null;
+  for (const prefix of SCRIPT_PREFIXES) {
+    if (token.startsWith(prefix)) {
+      const tail = token.slice(prefix.length);
+      return KNOWN_SCRIPTS.has(tail) ? tail : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Split a command into argv words, or return null if it contains anything
+ * beyond plain words: only [A-Za-z0-9_./:=,@%+-] unquoted, single-quoted
+ * literals, double-quoted text without backticks/backslashes/`!`, and
+ * `$NAME` / `${NAME}` expansions. Backslash-newline continuations are
+ * treated as whitespace.
+ */
+function tokenizeSimpleCommand(cmd) {
+  if (!cmd || typeof cmd !== 'string') return null;
+  const text = cmd.replace(/\\\r?\n/g, ' ').trim();
+  if (!text) return null;
+
+  const tokens = [];
+  let current = '';
+  let inWord = false;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === ' ' || ch === '\t') {
+      if (inWord) tokens.push(current);
+      current = '';
+      inWord = false;
+      i += 1;
+      continue;
+    }
+    inWord = true;
+    if (ch === "'") {
+      const end = text.indexOf("'", i + 1);
+      if (end < 0) return null;
+      const literal = text.slice(i + 1, end);
+      if (/[\r\n]/.test(literal)) return null;
+      current += literal;
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"') {
+      i += 1;
+      while (i < text.length && text[i] !== '"') {
+        const c = text[i];
+        if (c === '$') {
+          const v = matchVariable(text, i);
+          if (!v) return null;
+          current += v;
+          i += v.length;
+          continue;
+        }
+        if (c === '`' || c === '\\' || c === '!' || c === '\n' || c === '\r') return null;
+        current += c;
+        i += 1;
+      }
+      if (i >= text.length) return null;
+      i += 1;
+      continue;
+    }
+    if (ch === '$') {
+      const v = matchVariable(text, i);
+      if (!v) return null;
+      current += v;
+      i += v.length;
+      continue;
+    }
+    if (/[A-Za-z0-9_./:=,@%+-]/.test(ch)) {
+      current += ch;
+      i += 1;
+      continue;
+    }
+    return null;
+  }
+  if (inWord) tokens.push(current);
+  return tokens;
+}
+
+function matchVariable(text, i) {
+  const m = /^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/.exec(text.slice(i));
+  return m ? m[0] : null;
+}
+
+function looksProtected(arg) {
+  const parts = arg.replaceAll('\\', '/').toLowerCase().split('/').filter(Boolean);
+  if (parts.length === 0) return false;
+  const name = parts[parts.length - 1];
+  if (PROTECTED_BASENAMES.has(name) || name.startsWith('.env.')) return true;
+  if (parts.some((part) => PROTECTED_DIRS.has(part))) return true;
+  return PROTECTED_EXTENSIONS.some((ext) => name.endsWith(ext));
 }
 
 function isArcKitTempfile(p) {
@@ -203,3 +319,5 @@ function allow(reason) {
   }));
   process.exit(0);
 }
+
+main();
