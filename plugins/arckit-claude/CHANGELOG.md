@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Secret file scanner no longer skips arbitrary docs, README and CHANGELOG files.** Skip patterns are anchored to ArcKit's own plugin (and source repo) files, so a Write to `projects/x/docs/*.md`, `mydocs/*.md` or `EVIL-README.md` is scanned.
+
 - **`/arckit:pages`: large PlantUML diagrams render** (#648). Deflate encoding in place of hex, so URLs are several times shorter; a diagram still too large says so instead of blaming its syntax.
 
 - **Overlay recipes' `skill:` steps are namespaced when published** (#835), so `/arckit:build` can run them from a marketplace install.
