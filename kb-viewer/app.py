@@ -543,6 +543,8 @@ async def login(request: Request, email: str = Form(...), password: str = Form(.
         key="access_token",
         value=token,
         httponly=True,
+        secure=True,
+        samesite="lax",
         max_age=ACCESS_TOKEN_EXPIRE_HOURS * 3600,
     )
     return response
@@ -551,7 +553,7 @@ async def login(request: Request, email: str = Form(...), password: str = Form(.
 @app.get("/logout")
 async def logout():
     response = RedirectResponse(url="/", status_code=303)
-    response.delete_cookie("access_token")
+    response.delete_cookie("access_token", httponly=True, secure=True, samesite="lax")
     return response
 
 
