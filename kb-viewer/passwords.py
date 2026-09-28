@@ -35,16 +35,31 @@ def hash_password(password: str) -> str:
     return f"scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${_b64(salt)}${_b64(digest)}"
 
 
-def verify_password(password: str, encoded: str) -> bool:
+def _parse(encoded: str) -> tuple[bytes, bytes]:
+    scheme, n, r, p, salt_b64, digest_b64 = encoded.split("$")
+    if scheme != "scrypt" or (int(n), int(r), int(p)) != (SCRYPT_N, SCRYPT_R, SCRYPT_P):
+        raise ValueError("unsupported scrypt parameters")
+    salt = base64.b64decode(salt_b64, validate=True)
+    digest = base64.b64decode(digest_b64, validate=True)
+    if len(salt) < SALT_BYTES or len(digest) != SCRYPT_DKLEN:
+        raise ValueError("invalid salt or digest length")
+    return salt, digest
+
+
+def is_valid_hash(encoded: str) -> bool:
     try:
-        scheme, n, r, p, salt_b64, digest_b64 = encoded.split("$")
-        if scheme != "scrypt":
-            return False
-        salt = base64.b64decode(salt_b64)
-        expected = base64.b64decode(digest_b64)
-        actual = _scrypt(password, salt, int(n), int(r), int(p), len(expected))
+        _parse(encoded)
     except (ValueError, TypeError):
         return False
+    return True
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        salt, expected = _parse(encoded)
+    except (ValueError, TypeError):
+        return False
+    actual = _scrypt(password, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P, SCRYPT_DKLEN)
     return hmac.compare_digest(actual, expected)
 
 

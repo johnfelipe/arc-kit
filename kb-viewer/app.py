@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from jose import JWTError, jwt
 
 from md_parser import load_all_documents, search_content, get_dashboard_stats
-from passwords import DUMMY_HASH, verify_password
+from passwords import DUMMY_HASH, is_valid_hash, verify_password
 
 # --- Configuration ---
 MIN_SECRET_KEY_LENGTH = 32
@@ -35,6 +35,7 @@ ACCESS_TOKEN_EXPIRE_HOURS = 24
 
 LOGIN_MAX_FAILURES = int(os.environ.get("KB_LOGIN_MAX_FAILURES", "5"))
 LOGIN_WINDOW_SECONDS = int(os.environ.get("KB_LOGIN_WINDOW_SECONDS", "900"))
+LOGIN_MAX_TRACKED_KEYS = 10_000
 
 
 # --- Authorized Users ---
@@ -48,8 +49,11 @@ def load_users() -> dict:
     raw = json.loads(users_file.read_text(encoding="utf-8"))
     users = {}
     for email, info in raw.items():
-        if not info.get("password_hash", "").startswith("scrypt$"):
-            raise RuntimeError(f"User {email} is missing a scrypt password_hash in {users_file}.")
+        if not is_valid_hash(info.get("password_hash", "")):
+            raise RuntimeError(
+                f"User {email} has a missing or invalid password_hash in {users_file} "
+                "(generate one with `python passwords.py`)."
+            )
         users[email.strip().lower()] = {
             "name": info["name"],
             "role": info.get("role", ""),
@@ -84,8 +88,17 @@ def is_login_blocked(keys: list[str]) -> bool:
     return any(len(_recent_failures(k, now)) >= LOGIN_MAX_FAILURES for k in keys)
 
 
+def _prune_failures(now: float) -> None:
+    for k in [k for k, v in _failed_logins.items() if not v or now - v[-1] > LOGIN_WINDOW_SECONDS]:
+        del _failed_logins[k]
+    while len(_failed_logins) >= LOGIN_MAX_TRACKED_KEYS:
+        del _failed_logins[next(iter(_failed_logins))]
+
+
 def record_login_failure(keys: list[str]) -> None:
     now = time.monotonic()
+    if len(_failed_logins) >= LOGIN_MAX_TRACKED_KEYS:
+        _prune_failures(now)
     for k in keys:
         _recent_failures(k, now).append(now)
 
@@ -590,10 +603,10 @@ def login_error(message: str, status_code: int = 401) -> HTMLResponse:
 async def login(request: Request, email: str = Form(...), password: str = Form(...)):
     email_normalized = email.strip().lower()
     client_ip = request.client.host if request.client else "unknown"
-    limit_keys = [f"ip:{client_ip}", f"email:{email_normalized}"]
+    user = AUTHORIZED_USERS.get(email_normalized)
+    limit_keys = [f"ip:{client_ip}"] + ([f"email:{email_normalized}"] if user else [])
     if is_login_blocked(limit_keys):
         return login_error("Demasiados intentos fallidos. Intente nuevamente más tarde.", status_code=429)
-    user = AUTHORIZED_USERS.get(email_normalized)
     password_ok = verify_password(password, user["password_hash"] if user else DUMMY_HASH)
     if not user or not password_ok:
         record_login_failure(limit_keys)
