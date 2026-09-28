@@ -37,9 +37,9 @@
  * Claude Code docs, deny rules take precedence over plugin hook allows.
  */
 
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 
 // Plugin root = parent of the hooks/ dir this script lives in.
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -279,9 +279,28 @@ function isArcKitTempfile(p) {
   // and the mktemp random tail. Auto-allow Read against these so the
   // orchestrator can re-inspect a payload it just wrote.
   //
-  // Risk surface: Read-only, /tmp-scoped, transient. To exploit this an
-  // attacker would already need Bash auto-allow to plant the file.
-  return /^\/tmp\/(?:arckit-)?[a-z][a-z0-9-]*-handoff(?:-[a-z][a-z0-9-]*)?[A-Za-z0-9.-]*\.json$/.test(p);
+  // /tmp is shared and world-writable, so the name alone proves nothing:
+  // another local user could plant a symlink or hard link there pointing
+  // at a sensitive file. Only auto-allow a regular, single-link file owned
+  // by the current user that sits directly in the real temp directory
+  // (mktemp creates exactly that; sticky /tmp stops others replacing it).
+  if (!/^\/tmp\/(?:arckit-)?[a-z][a-z0-9-]*-handoff(?:-[a-z][a-z0-9-]*)?[A-Za-z0-9.-]*\.json$/.test(p)) {
+    return false;
+  }
+  return isOwnedRegularFile(p);
+}
+
+function isOwnedRegularFile(p) {
+  if (typeof process.getuid !== 'function') return false;
+  try {
+    const st = lstatSync(p);
+    if (!st.isFile() || st.isSymbolicLink()) return false;
+    if (st.nlink !== 1) return false;
+    if (st.uid !== process.getuid()) return false;
+    return realpathSync(p) === resolve(realpathSync(dirname(p)), basename(p));
+  } catch {
+    return false;
+  }
 }
 
 function shortPath(p) {
