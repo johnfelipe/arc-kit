@@ -8,25 +8,33 @@ Herramienta web moderna e intuitiva para consultar y verificar la base de conoci
 - **Visor de Documentos** — Renderizado completo de Markdown con tabla de contenido y metadata
 - **Búsqueda Full-Text** — Búsqueda instantánea en todos los documentos con snippets de contexto
 - **Matriz de Trazabilidad** — Mapeo de 143 requisitos (BR/FR/NFR/INT/DR) a través de los 17 artefactos
-- **Autenticación** — Acceso restringido a los 5 usuarios autorizados del equipo GFT
+- **Autenticación** — Acceso restringido a usuarios autorizados configurados fuera del código
 
-## Usuarios Autorizados
+## Configuración de Acceso
 
-| Email | Nombre |
-|-------|--------|
-| Ricardo.Aguero@gft.com | Ricardo Agüero |
-| Roberto.Hernandez-Robles@gft.com | Roberto Hernández-Robles |
-| Maria-Andreina.Hidalgo@gft.com | María Andreína Hidalgo |
-| Peter-Wilhelm@gft.com | Peter Wilhelm |
-| Eduardo.Rojas@gft.com | Eduardo Rojas |
+La aplicación no incluye credenciales en el código. Antes de iniciarla:
 
-**Contraseña inicial:** `ArcKit2026!`
+1. **Clave de firma JWT** — defina `KB_SECRET_KEY` con un valor aleatorio de al menos 32 caracteres (la app no arranca sin ella):
+
+   ```bash
+   export KB_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+   ```
+
+2. **Usuarios** — copie `users.example.json` a `users.json` (ignorado por git) o apunte `KB_USERS_FILE` a otra ruta. Cada usuario tiene su propio hash scrypt con sal, generado con:
+
+   ```bash
+   python passwords.py
+   ```
+
+Variables opcionales: `KB_HOST` (por defecto `127.0.0.1`), `KB_PORT` (`8000`), `KB_LOGIN_MAX_FAILURES` (`5`) y `KB_LOGIN_WINDOW_SECONDS` (`900`) para el bloqueo por intentos fallidos de inicio de sesión (por IP y por correo).
 
 ## Ejecución Local
 
 ```bash
 cd kb-viewer
 pip install -r requirements.txt
+cp users.example.json users.json   # editar con usuarios y hashes reales
+export KB_SECRET_KEY="..."
 python app.py
 # Abrir http://localhost:8000
 ```
@@ -52,5 +60,5 @@ python app.py
 
 - **Backend:** Python + FastAPI (auto-discovery de archivos .md)
 - **Frontend:** Tailwind CSS + Alpine.js + Marked.js (embebido en app.py)
-- **Auth:** JWT con SHA-256
+- **Auth:** JWT (HS256) + contraseñas por usuario con scrypt y sal, con límite de intentos de login
 - **Parser:** Extracción dinámica de metadata, secciones, tablas y requisitos desde Markdown

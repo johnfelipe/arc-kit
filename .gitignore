@@ -247,3 +247,6 @@ deepbook-test-output/
 
 # Behavioural eval recordings (scripts/eval-headless.py, claude plugin eval)
 plugins/arckit-claude/evals/results/
+
+# kb-viewer credentials
+kb-viewer/users.json

@@ -6,9 +6,11 @@ All HTML templates are embedded in this file so the app is fully self-contained.
 Artifacts are auto-discovered from the ./artifacts/ directory.
 """
 
-import hashlib
+import json
 import os
 import re
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -18,28 +20,80 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from jose import JWTError, jwt
 
 from md_parser import load_all_documents, search_content, get_dashboard_stats
+from passwords import DUMMY_HASH, verify_password
 
 # --- Configuration ---
-SECRET_KEY = os.environ.get("KB_SECRET_KEY", "arckit-kb-secret-2026-cap-gft")
+MIN_SECRET_KEY_LENGTH = 32
+SECRET_KEY = os.environ.get("KB_SECRET_KEY", "")
+if len(SECRET_KEY) < MIN_SECRET_KEY_LENGTH:
+    raise RuntimeError(
+        f"KB_SECRET_KEY must be set to a random value of at least {MIN_SECRET_KEY_LENGTH} characters "
+        "(e.g. `python -c \"import secrets; print(secrets.token_urlsafe(48))\"`)."
+    )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
-DEFAULT_PASSWORD = "ArcKit2026!"
+
+LOGIN_MAX_FAILURES = int(os.environ.get("KB_LOGIN_MAX_FAILURES", "5"))
+LOGIN_WINDOW_SECONDS = int(os.environ.get("KB_LOGIN_WINDOW_SECONDS", "900"))
+
 
 # --- Authorized Users ---
-AUTHORIZED_USERS = {
-    "Ricardo.Aguero@gft.com": {"name": "Ricardo Agüero", "role": "Arquitecto"},
-    "Roberto.Hernandez-Robles@gft.com": {"name": "Roberto Hernández-Robles", "role": "Arquitecto"},
-    "Maria-Andreina.Hidalgo@gft.com": {"name": "María Andreína Hidalgo", "role": "Arquitecta"},
-    "Peter-Wilhelm@gft.com": {"name": "Peter Wilhelm", "role": "Arquitecto"},
-    "Eduardo.Rojas@gft.com": {"name": "Eduardo Rojas", "role": "Arquitecto"},
-}
+def load_users() -> dict:
+    users_file = Path(os.environ.get("KB_USERS_FILE", Path(__file__).parent / "users.json"))
+    if not users_file.is_file():
+        raise RuntimeError(
+            f"Users file not found: {users_file}. Create it from users.example.json "
+            "or set KB_USERS_FILE."
+        )
+    raw = json.loads(users_file.read_text(encoding="utf-8"))
+    users = {}
+    for email, info in raw.items():
+        if not info.get("password_hash", "").startswith("scrypt$"):
+            raise RuntimeError(f"User {email} is missing a scrypt password_hash in {users_file}.")
+        users[email.strip().lower()] = {
+            "name": info["name"],
+            "role": info.get("role", ""),
+            "password_hash": info["password_hash"],
+        }
+    if not users:
+        raise RuntimeError(f"No users defined in {users_file}.")
+    return users
 
 
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+AUTHORIZED_USERS = load_users()
 
 
-DEFAULT_PASSWORD_HASH = hash_password(DEFAULT_PASSWORD)
+def public_user(email: str) -> dict:
+    info = AUTHORIZED_USERS[email]
+    return {"email": email, "name": info["name"], "role": info["role"]}
+
+
+# --- Login rate limiting ---
+_failed_logins: dict[str, deque] = defaultdict(deque)
+
+
+def _recent_failures(key: str, now: float) -> deque:
+    attempts = _failed_logins[key]
+    while attempts and now - attempts[0] > LOGIN_WINDOW_SECONDS:
+        attempts.popleft()
+    return attempts
+
+
+def is_login_blocked(keys: list[str]) -> bool:
+    now = time.monotonic()
+    return any(len(_recent_failures(k, now)) >= LOGIN_MAX_FAILURES for k in keys)
+
+
+def record_login_failure(keys: list[str]) -> None:
+    now = time.monotonic()
+    for k in keys:
+        _recent_failures(k, now).append(now)
+
+
+def clear_login_failures(keys: list[str]) -> None:
+    for k in keys:
+        _failed_logins.pop(k, None)
+
 
 # --- App Setup ---
 app = FastAPI(
@@ -73,7 +127,7 @@ def verify_token(token: str) -> Optional[dict]:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email = payload.get("sub")
         if email and email in AUTHORIZED_USERS:
-            return {"email": email, **AUTHORIZED_USERS[email]}
+            return public_user(email)
         return None
     except JWTError:
         return None
@@ -526,23 +580,32 @@ async def root(request: Request):
     return HTMLResponse(content=html)
 
 
+def login_error(message: str, status_code: int = 401) -> HTMLResponse:
+    error_block = f'<div class="mb-6 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">{message}</div>'
+    html = LOGIN_HTML.replace("{{ERROR_BLOCK}}", error_block)
+    return HTMLResponse(content=html, status_code=status_code)
+
+
 @app.post("/login")
 async def login(request: Request, email: str = Form(...), password: str = Form(...)):
-    email_normalized = email.strip()
-    if email_normalized not in AUTHORIZED_USERS:
-        error_block = '<div class="mb-6 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">Usuario no autorizado. Contacte al administrador.</div>'
-        html = LOGIN_HTML.replace("{{ERROR_BLOCK}}", error_block)
-        return HTMLResponse(content=html)
-    if hash_password(password) != DEFAULT_PASSWORD_HASH:
-        error_block = '<div class="mb-6 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">Contraseña incorrecta.</div>'
-        html = LOGIN_HTML.replace("{{ERROR_BLOCK}}", error_block)
-        return HTMLResponse(content=html)
+    email_normalized = email.strip().lower()
+    client_ip = request.client.host if request.client else "unknown"
+    limit_keys = [f"ip:{client_ip}", f"email:{email_normalized}"]
+    if is_login_blocked(limit_keys):
+        return login_error("Demasiados intentos fallidos. Intente nuevamente más tarde.", status_code=429)
+    user = AUTHORIZED_USERS.get(email_normalized)
+    password_ok = verify_password(password, user["password_hash"] if user else DUMMY_HASH)
+    if not user or not password_ok:
+        record_login_failure(limit_keys)
+        return login_error("Correo o contraseña incorrectos.")
+    clear_login_failures(limit_keys)
     token = create_access_token({"sub": email_normalized})
     response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
         key="access_token",
         value=token,
         httponly=True,
+        samesite="lax",
         max_age=ACCESS_TOKEN_EXPIRE_HOURS * 3600,
     )
     return response
@@ -646,4 +709,4 @@ async def api_traceability(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=os.environ.get("KB_HOST", "127.0.0.1"), port=int(os.environ.get("KB_PORT", "8000")))
