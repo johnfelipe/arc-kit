@@ -1,0 +1,7 @@
+{
+  "usuario@example.com": {
+    "name": "Nombre Apellido",
+    "role": "Arquitecto",
+    "password_hash": "scrypt$32768$8$<salt-base64>$<hash-base64>"
+  }
+}
